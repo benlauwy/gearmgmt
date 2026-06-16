@@ -1,0 +1,27 @@
+# Role policy: per-org desired ENTERPRISE role, keyed by organization name.
+#
+# Copy this file to `roles.toml` and fill in your real role_id values:
+#   cp roles.toml.example roles.toml
+#
+# Design:
+#   - Each org is its own "kind".
+#   - The governed role dimension is the single, global ENTERPRISE role each
+#     member should hold (product access), NOT the per-org admin/member role.
+#   - role_id values come from GET /v3/enterprise/roles.
+#
+# IMPORTANT — single-org invariant:
+#   The enterprise role is a SINGLE global value per user. Only ADMINS
+#   (enterprise role name contains "Admin"; see config.toml [governance]) may
+#   belong to multiple orgs. Non-admins must be in exactly one org, so their
+#   desired enterprise role is unambiguous. A non-admin found in >1 org is a
+#   VIOLATION reported by reconcile and corrected by move.
+#
+# Used by the engine for onboard (joiner), move (mover), and reconcile/coverage.
+
+"Admin Org"        = "role-REPLACE_WITH_ADMIN_ROLE_ID"        # Admin
+"IDE Light"        = "role-REPLACE_WITH_IDE_ONLY_ROLE_ID"     # IDE only
+"IDE Standard"     = "role-REPLACE_WITH_IDE_ONLY_ROLE_ID"     # IDE only
+"IDE Super"        = "role-REPLACE_WITH_IDE_ONLY_ROLE_ID"     # IDE only
+"CLI IDE Light"    = "role-REPLACE_WITH_CLI_AND_IDE_ROLE_ID"  # CLI and IDE
+"CLI IDE Standard" = "role-REPLACE_WITH_CLI_AND_IDE_ROLE_ID"  # CLI and IDE
+"CLI IDE Super"    = "role-REPLACE_WITH_CLI_AND_IDE_ROLE_ID"  # CLI and IDE

@@ -1,0 +1,16 @@
+# Per-user monthly Local Agent ACU limits, keyed by organization name.
+#
+# Used by set_local_agent_acu_limits_bulk.py:
+#   DEVIN_SERVICE_USER_TOKEN=<token> python set_local_agent_acu_limits_bulk.py limits.toml [--dry-run]
+#
+# Each value must be a positive integer, or the string "null" to set no limit
+# (unlimited) -- TOML has no bare null, so quote it, e.g. "Some Org" = "null".
+# Edit the defaults below as needed.
+
+"IDE Light"        = 18
+"IDE Standard"     = 36
+"IDE Super"        = 72
+"CLI IDE Light"    = 180
+"CLI IDE Standard" = 360
+"CLI IDE Super"    = 720
+"Admin Org"        = "null"

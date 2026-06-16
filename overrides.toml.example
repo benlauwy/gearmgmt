@@ -1,0 +1,23 @@
+# Manual override file — the source-of-truth EXCEPTION.
+#
+# Copy this file to `overrides.toml` and add your real entries:
+#   cp overrides.toml.example overrides.toml
+#
+# Users listed here are honored AS-IS and EXCLUDED from reconcile auto-correction.
+# Keyed by user_id. Fields:
+#   reason           (required) — recorded in the audit log for every decision
+#   limit            (optional) — per-user Local Agent ACU cycle limit:
+#                                 a positive integer, or "null" for unlimited
+#   enterprise_role  (optional) — pinned enterprise role_id
+#
+# NOTE: Admins (enterprise role name contains "Admin"; see config.toml
+# [governance].admin_role_name_contains) are ALREADY exempt from member
+# governance and from the single-org rule, so they do not strictly need an
+# entry here. Add an entry only to PIN a specific limit/role for a user, or to
+# exempt a non-admin from reconciliation.
+
+# Example entry (uncomment and replace the key + values with your own):
+# ["okta|YourEnterprise|00uXXXXXXXXXXXXXXXXX"]
+# reason = "Enterprise admin — multi-org, unlimited"
+# enterprise_role = "account_admin"
+# limit = "null"

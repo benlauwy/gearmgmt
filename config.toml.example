@@ -1,0 +1,45 @@
+# Operational configuration for the governance engine.
+#
+# Copy this file to `config.toml` and fill in your tenant-specific values:
+#   cp config.toml.example config.toml
+#
+# Secrets and host come from the environment / .env (never commit them):
+#   DEVIN_SERVICE_USER_TOKEN  — service-user token (prefix cog_)
+#   DEVIN_API_BASE_URL        — e.g. https://<company>.devinenterprise.com/api
+
+[paths]
+limits_policy = "limits.toml"     # per-org ACU limit (existing)
+roles_policy  = "roles.toml"      # per-org desired enterprise role
+overrides     = "overrides.toml"  # per-user source-of-truth exceptions
+audit_log     = "audit.jsonl"     # append-only audit log (who/what/when/why/triggered-by)
+state_dir     = "state"           # snapshots + plan/resume files
+
+[governance]
+# A user whose ENTERPRISE role name contains any of these (case-insensitive) is
+# treated as an ADMIN: allowed in multiple orgs and exempt from member
+# governance / reconcile correction.
+admin_role_name_contains = ["Admin"]
+
+[leaver]
+# On offboard, zero the limit, remove the user from ALL orgs, then set this
+# enterprise role. `limit` is the reclaimed cap (0 = zeroed; "null" = unlimited).
+# role_id values come from GET /v3/enterprise/roles.
+enterprise_role_id = "role-REPLACE_WITH_LEAVER_ROLE_ID"  # e.g. "Member"
+limit = 0
+
+[utilization]
+# Near-cap detection (detection only; emits candidates for the update-limits upgrade).
+near_cap_pct      = 0.8   # flag users at >= 80% of their cap
+trend_window_days = 14    # look-back window for the recent-vs-prior usage trend
+cycle_days        = 30    # window summed as "this cycle" usage vs the per-user cap
+# Consumption products that count toward the Local Agent cap. Empty = use the
+# endpoint's total_acus. The daily endpoint splits usage into devin / cascade /
+# terminal / review; set e.g. ["cascade", "terminal"] to count only local-agent
+# usage (verify against your billing definition before relying on it).
+products          = []
+
+[api]
+# Cross-cutting resilience: resumable partial-failure handling + retry on rate limit.
+rate_limit_sleep_seconds = 0.1
+max_retries              = 5
+retry_backoff_seconds    = 2.0

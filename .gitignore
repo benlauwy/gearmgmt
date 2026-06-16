@@ -1,0 +1,15 @@
+# Secrets — never commit
+.env
+
+# Local policy files (tenant-specific IDs / PII) — commit the *.example instead
+config.toml
+overrides.toml
+roles.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime artifacts written by the engine (not source of truth)
+audit.jsonl
+state/**/*.json
