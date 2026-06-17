@@ -13,3 +13,5 @@ __pycache__/
 # Runtime artifacts written by the engine (not source of truth)
 audit.jsonl
 state/**/*.json
+
+.DS_Store
