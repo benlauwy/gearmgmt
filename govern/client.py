@@ -105,6 +105,16 @@ class DevinClient:
         )
 
     # ---- writes (verified) — respect dry_run ----
+    def invite_users(self, emails: list[str], enterprise_role_id: str):
+        """Bulk-invite new enterprise users by email, granting them an enterprise
+        role (POST /v3/enterprise/members/users). Returns the created User
+        objects (each with its new ``user_id``). Does NOT place anyone in an org;
+        follow with add_user_to_org. The API accepts up to 100 emails per call."""
+        return self._mutate(
+            "POST", "/v3/enterprise/members/users",
+            body={"emails": emails, "enterprise_role_id": enterprise_role_id},
+        )
+
     def set_user_limit(self, user_id: str, acu_limit: Optional[int]):
         return self._mutate(
             "PATCH", f"/v3beta1/enterprise/users/{self._uid(user_id)}/consumption/acu-limits",

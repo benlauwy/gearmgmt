@@ -9,8 +9,28 @@ from .config import Config
 from .plan import Change, Plan
 
 
-def _apply_change(client, c: Change):
-    """Dispatch one Change to the right client mutation (set-to-desired)."""
+def _user_id_from_invite(resp, email: str) -> str:
+    """Pull the new user_id out of an invite response (best-effort email match)."""
+    if not isinstance(resp, list):  # dry-run sentinel dict — no real id assigned
+        return ""
+    match = next((u for u in resp
+                  if (u.get("email") or "").lower() == (email or "").lower()), None)
+    user = match or (resp[0] if resp else None)
+    uid = (user or {}).get("user_id")
+    if not uid:
+        raise RuntimeError(f"invite of {email!r} returned no user_id")
+    return uid
+
+
+def _apply_change(client, c: Change) -> str:
+    """Dispatch one Change to the right client mutation (set-to-desired).
+
+    Returns the resolved user_id for a ``user_invite`` (the API assigns it), so
+    the caller can thread it into that invitee's org-add/limit changes; returns
+    "" for every other change kind (and for dry-run invites)."""
+    if c.kind == "user_invite":
+        resp = client.invite_users([c.email], c.after)
+        return _user_id_from_invite(resp, c.email)
     if c.field == "limit":
         client.set_user_limit(c.user_id, c.after)
     elif c.field == "enterprise_role":
@@ -26,6 +46,7 @@ def _apply_change(client, c: Change):
             raise RuntimeError(f"unknown org_membership kind: {c.kind}")
     else:
         raise RuntimeError(f"unknown change field: {c.field}")
+    return ""
 
 
 def _persist(plan: Plan, plan_path) -> None:
@@ -36,14 +57,18 @@ def _persist(plan: Plan, plan_path) -> None:
 
 
 def _group_by_user(changes) -> "list[tuple[str, list]]":
-    """Group changes by user_id, preserving first-appearance order."""
+    """Group changes by subject, preserving first-appearance order.
+
+    The subject is the user_id, or the email for a not-yet-created invitee (whose
+    user_id is only assigned when the invite is applied)."""
     order, groups = [], {}
     for c in changes:
-        if c.user_id not in groups:
-            groups[c.user_id] = []
-            order.append(c.user_id)
-        groups[c.user_id].append(c)
-    return [(uid, groups[uid]) for uid in order]
+        key = c.subject
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(c)
+    return [(key, groups[key]) for key in order]
 
 
 def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
@@ -81,15 +106,33 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
             print(f"  -> entire user held pending --approved (needs: {', '.join(blockers)})")
             continue
 
+        resolved_uid = ""  # set once this invitee's user_invite is applied
         for c in pending:
+            # A new invitee's org-add/limit changes can only run once the invite
+            # has assigned a user_id. If the invite hasn't (yet) succeeded, skip.
+            if c.kind != "user_invite" and not c.user_id:
+                if not resolved_uid:
+                    c.status, c.error = "failed", "skipped: invite did not complete"
+                    counts["failed"] += 1
+                    print(f"  [SKIP]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: invite incomplete")
+                    _persist(plan, plan_path)
+                    continue
+                c.user_id = resolved_uid
             try:
-                _apply_change(client, c)
+                new_uid = _apply_change(client, c)
             except Exception as e:  # noqa: BLE001 - record and continue (resumable)
                 c.status, c.error = "failed", str(e)
                 counts["failed"] += 1
                 print(f"  [FAIL]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: {e}")
                 _persist(plan, plan_path)
                 continue
+            if c.kind == "user_invite":
+                # Thread the freshly-assigned id (or a dry-run placeholder) into
+                # this invitee's remaining org-add/limit changes.
+                resolved_uid = new_uid or "<dry-run-user>"
+                for other in pending:
+                    if not other.user_id:
+                        other.user_id = resolved_uid
             if client.dry_run:
                 counts["would"] += 1
                 print(f"  [DRY]   {c.kind:14} {c.field:16} {c.before} -> {c.after}")
@@ -97,7 +140,7 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
                 c.status, c.error = "applied", None
                 counts["applied"] += 1
                 print(f"  [OK]    {c.kind:14} {c.field:16} {c.before} -> {c.after}")
-                state.audit(cfg, action=c.kind, user_id=uid, field=c.field,
+                state.audit(cfg, action=c.kind, user_id=c.user_id or uid, field=c.field,
                             before=c.before, after=c.after, reason=c.reason,
                             triggered_by=triggered_by, dry_run=False)
                 _persist(plan, plan_path)

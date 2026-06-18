@@ -17,7 +17,10 @@ from .config import Config
 # Increases in access require human approval; the rest auto-apply.
 # role_change is conservatively treated as needing approval until a role-rank is
 # defined (a change could grant access); role_revoke (-> no role) auto-applies.
-NEEDS_APPROVAL = {"limit_increase", "role_grant", "role_upgrade", "role_change", "org_add"}
+# user_invite creates a brand-new enterprise user (the ultimate grant), so it is
+# always gated.
+NEEDS_APPROVAL = {"user_invite", "limit_increase", "role_grant", "role_upgrade",
+                  "role_change", "org_add"}
 AUTO_APPLY = {"limit_decrease", "role_revoke", "role_downgrade", "org_remove"}
 
 
@@ -30,12 +33,21 @@ class Change:
     after: Any
     reason: str
     org_id: Optional[str] = None
+    # For user_invite (and the org_add/limit changes that follow it) the user_id
+    # does not exist yet at plan time; the invitee is keyed by email and the
+    # user_id is filled in during apply, once the invite call returns it.
+    email: Optional[str] = None
     status: str = "pending"   # pending | applied | failed | skipped
     error: Optional[str] = None
 
     @property
     def needs_approval(self) -> bool:
         return self.kind in NEEDS_APPROVAL
+
+    @property
+    def subject(self) -> str:
+        """Human label for output: the user_id once known, else the email."""
+        return self.user_id or self.email or "<unknown>"
 
 
 @dataclass

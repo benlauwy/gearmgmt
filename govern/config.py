@@ -58,6 +58,7 @@ class Config:
     leaver: dict[str, Any]
     utilization: dict[str, Any]
     api: dict[str, Any]
+    invite: dict[str, Any]
     token: str = ""
     base_url: str = "https://api.devin.ai"
 
@@ -77,6 +78,7 @@ def load_config(path: Optional[str] = None) -> Config:
         leaver=data.get("leaver", {}),
         utilization=data.get("utilization", {}),
         api=data.get("api", {}),
+        invite=data.get("invite", {}),
         token=os.environ.get("DEVIN_SERVICE_USER_TOKEN", ""),
         base_url=os.environ.get("DEVIN_API_BASE_URL", "https://api.devin.ai").rstrip("/"),
     )

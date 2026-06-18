@@ -4,7 +4,9 @@ A small CLI that keeps every enterprise user's **Local Agent ACU limit** and
 **enterprise role** in line with policy files — with a diff-first plan/apply
 workflow, an approval gate, and a full audit log.
 
-Pure standard library (Python 3.11+), no dependencies to install.
+Standard library only (Python 3.11+) — the single optional dependency is
+`openpyxl`, needed only to read Excel (`.xlsx`) onboarding rosters (CSV rosters
+need nothing extra).
 
 ---
 
@@ -20,6 +22,12 @@ cp overrides.toml.example overrides.toml  # per-user exceptions (optional)
 These copies hold tenant-specific IDs / PII and are git-ignored; edit them with
 your real values. `limits.toml` is committed, so edit it in place.
 
+Onboarding from an **Excel** roster needs `openpyxl` (CSV needs nothing):
+
+```bash
+pip install -r requirements.txt   # only required for .xlsx rosters
+```
+
 `.env` needs a service-user token and (for dedicated deployments) the API host:
 
 ```
@@ -29,7 +37,7 @@ DEVIN_API_BASE_URL=https://<company>.devinenterprise.com/api
 
 The token's service user needs these enterprise permissions:
 `ViewAccountMembership` (reads), `ManageBilling` (limits),
-`ManageAccountMembership` (roles + org add/remove).
+`ManageAccountMembership` (invites + roles + org add/remove).
 
 Run everything via the entrypoint:
 
@@ -43,66 +51,93 @@ python govern.py --help
 ## 2. Usage — a member's lifecycle
 
 Every **action** command is diff-first: it writes a plan to `state/plans/` and
-changes nothing until you `apply` it. **Read-only** commands (`reconcile`,
-`coverage`, `usage`) just report. Add `--dry-run` to simulate any command, and
-pass `--user` as **either an email or the raw user_id** (for `onboard`,
-`update-limits`, and `offboard`). See *How it works* (next section) for the
-approval gate.
+changes nothing until you `apply` it — so each step below pairs a command with
+the `apply` that materializes it. **Read-only** commands just *report*
+(`reconcile` also writes a plan you can apply). Add `--dry-run` to simulate any
+command, and pass `--user` as **either an email or the raw user_id**. See *How it
+works* (next section) for the approval gate.
 
-**Check the current state (any time, read-only):**
-```bash
-python govern.py reconcile      # drift: actual vs desired, across everyone
-python govern.py coverage       # per-org limit & role coverage
-```
+The four commands below cover the everyday lifecycle — **onboard → reconcile →
+usage → offboard**. See *Commands* (section 4) for the full set, including
+`coverage`, `update-limits`, `move`, and `reassign`.
 
-### A new person joins
-`onboard` does **not** add anyone to an org. The person must already exist in
-Devin and already be a member of their org (placed there by your IDP/SSO group
-sync or in the admin UI). `onboard` reads the org they're in and sets the
-matching limit + enterprise role from policy. New grants need `--approved`:
+### New people join → `onboard`
+`onboard` **invites** users from a roster file (CSV or `.xlsx`) and materializes
+each one from policy: it creates the user with their org's enterprise role
+(`roles.toml`), adds them to that org, and sets the org's ACU limit
+(`limits.toml`). Anyone who already exists is reconciled, not re-invited.
+
+The roster has a header row and one or two columns: an **email** column
+(required) plus a **group / organization name** column (optional). With two
+columns the email and org columns are auto-detected; with one column you pick a
+single target org from an arrow-key menu. Anything malformed — more than two
+columns, an invalid email, an unknown/ungoverned org — fails up front, before
+anyone is invited. (If the first row already looks like data rather than labels,
+it's kept as a data row with a warning.)
+
+Invites and grants are gated, so `apply` needs `--approved`:
 ```bash
-python govern.py onboard --user "jane@company.com"
+python govern.py onboard --file roster.csv
 python govern.py apply state/plans/onboard-<ts>.json --approved
 ```
-Standing up a whole new org/tier? Onboard everyone already in it at once:
+
+Example two-column roster:
+```csv
+email,group
+jane@company.com,IDE Standard
+raj@company.com,CLI IDE Super
+```
+New members receive a per-org role on join — set `[invite].org_role_id` (or
+`org_role_name`) in `config.toml` (run `onboard` once to see the available org
+roles if unsure).
+
+### Move people to a new org → `reassign`
+`reassign` is onboard's sibling for **existing** members: it bulk-**moves** people
+to a new org from the same kind of roster. For each row it adds the member to the
+destination org, sets that org's enterprise role (`roles.toml`) and ACU limit
+(`limits.toml`), then removes them from their other governed orgs (ungoverned
+memberships are left alone). Every email must already be an enterprise user —
+unknown emails fail up front (use `onboard` to invite new ones). This is the
+proactive, file-driven counterpart to `move`, which instead *detects* org changes
+that already happened.
+
+The roster is the same shape as onboard's: two columns (email + **destination**
+group), or one column (email only) where you pick a single destination from an
+arrow-key menu. The org add and any role/limit increase are gated, so `apply`
+needs `--approved`; the org removals and limit decreases auto-apply:
 ```bash
-python govern.py onboard --org "IDE Standard"
-python govern.py apply state/plans/onboard-<ts>.json --approved
+python govern.py reassign --file moves.csv
+python govern.py apply state/plans/reassign-<ts>.json --approved
+```
+Example two-column roster:
+```csv
+email,group
+jane@company.com,IDE Super
+raj@company.com,CLI IDE Standard
 ```
 
-### A person is hitting their cap
-`usage` flags anyone near/at their limit and prints the exact upgrade command:
+### Check & fix drift → `reconcile`
+`reconcile` reports drift (actual vs desired) across **everyone** and writes a
+plan; `apply` it to bring the population back in line. Decreases/revokes apply
+immediately; increases/grants are held for `--approved`:
 ```bash
-python govern.py usage
-```
-After bumping their tier (move them to a higher org, or edit policy),
-re-materialize just that user — increases need `--approved`:
-```bash
-python govern.py update-limits --user "jane@company.com"
-python govern.py apply state/plans/update-limits-<ts>.json --approved
+python govern.py reconcile                                         # report drift + write a plan
+python govern.py apply state/plans/reconcile-<ts>.json             # decreases/revokes now
+python govern.py apply state/plans/reconcile-<ts>.json --approved  # ...increases/grants too
 ```
 
-### A whole tier's limit changes
-Edit `limits.toml`, then re-materialize the affected org. Decreases apply
-immediately; increases are held for approval:
+### Someone's hitting their cap → `usage`
+`usage` flags anyone near/at their limit (detection only — it writes no plan). To
+raise someone, bump their tier (move them to a higher org, or edit `limits.toml`
+/ `overrides.toml`), then `reconcile` to materialize the increase:
 ```bash
-python govern.py update-limits --org "IDE Light" --dry-run   # preview
-python govern.py update-limits --org "IDE Light"
-python govern.py apply state/plans/update-limits-<ts>.json             # decreases now
-python govern.py apply state/plans/update-limits-<ts>.json --approved  # ...increases too
+python govern.py usage                                             # flag near/at-cap users
+# ...raise their org/limit in policy, then:
+python govern.py reconcile
+python govern.py apply state/plans/reconcile-<ts>.json --approved  # the increase needs --approved
 ```
 
-### A person moves to a different org
-`move` diffs membership against the last snapshot and re-resolves movers' limit +
-role from their new org. The first run just records a baseline:
-```bash
-python govern.py move           # first run = baseline
-# ...after the move happens in Devin...
-python govern.py move
-python govern.py apply state/plans/move-<ts>.json [--approved]
-```
-
-### A person leaves
+### A person leaves → `offboard`
 `offboard` zeros their limit, removes them from **every** org, and sets the
 leaver role. Every change is a revoke/downgrade, so it all auto-applies (no
 `--approved` needed):
@@ -166,14 +201,16 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `reconcile` | Report drift (actual vs desired) across everyone; save a plan |
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
 | `usage` | Flag users near/at their cap; emit upgrade candidates |
-| `onboard --user USER \| --org NAME` | Set a joiner's limit + role from policy → plan |
+| `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
 | `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` → plan |
 | `move` | Detect users who changed orgs since last run → plan |
+| `reassign --file PATH` | Bulk-move existing members to a new org from a CSV/`.xlsx` roster: add to destination + set role/limit, remove from old governed org → plan |
 | `offboard --user USER \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role → plan |
 | `apply PLAN [--approved]` | Execute a saved plan (gated, audited, resumable) |
 
-`--user` accepts an email or the raw user_id. Global flags (accepted before or
-after the command): `--dry-run`, `--config PATH`.
+`--user` accepts an email or the raw user_id. `onboard --file` and
+`reassign --file` accept a `.csv` or `.xlsx` roster. Global flags (accepted before
+or after the command): `--dry-run`, `--config PATH`.
 
 ---
 
@@ -184,7 +221,8 @@ after the command): `--dry-run`, `--config PATH`.
 - `roles.toml` — per-org desired enterprise `role_id`. *(git-ignored — copy from `roles.toml.example`)*
 - `overrides.toml` — per-user exceptions, keyed by `user_id` (honored, excluded
   from correction; this is where admins are pinned). *(git-ignored — copy from `overrides.toml.example`)*
-- `config.toml` — admin detection, leaver role/limit, near-cap thresholds, retry. *(git-ignored — copy from `config.toml.example`)*
+- `config.toml` — admin detection, leaver role/limit, near-cap thresholds, retry,
+  invite org-role (`[invite]`). *(git-ignored — copy from `config.toml.example`)*
 
 > `config.toml`, `roles.toml`, and `overrides.toml` hold tenant-specific IDs / PII,
 > so they are git-ignored and committed only as `*.example` templates. Keep your

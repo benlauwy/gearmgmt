@@ -9,6 +9,16 @@ from .config import load_config
 from . import workflows
 
 
+# Shown as the top-level description AND appended to every subcommand's
+# ``--help`` so a reader always sees what the tool itself is.
+_ENGINE = (
+    "govern is the Devin enterprise governance engine: it manages members' "
+    "organization membership, enterprise/org roles, and per-user ACU limits. "
+    "It is diff-first: every command computes the changes and writes a plan "
+    "that you then apply through an approval gate (govern.py apply)."
+)
+
+
 def _client(cfg, dry_run: bool) -> DevinClient:
     return DevinClient(
         cfg.token, cfg.base_url, dry_run=dry_run,
@@ -27,39 +37,47 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="plan only; never mutate")
 
     p = argparse.ArgumentParser(prog="govern", parents=[common],
-                                description="Devin enterprise limit & role governance")
+                                description=_ENGINE)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("onboard", parents=[common],
-                        help="set a new member's limit + role from policy")
-    sp.add_argument("--user", help="email or user_id of the joiner")
-    sp.add_argument("--org", help="org name: whole-org, or to validate --user")
+    def add(name: str, summary: str, **kwargs):
+        """Register a subcommand. ``summary`` is the one-line help shown in the
+        top-level command list; combined with the engine overview it also
+        becomes the description printed by ``govern.py <command> --help``."""
+        return sub.add_parser(name, parents=[common], help=summary,
+                              description=f"{summary}. {_ENGINE}", **kwargs)
 
-    sub.add_parser("move", parents=[common],
-                   help="re-materialize members who changed orgs since last run")
+    sp = add("onboard", "invite users from a CSV/.xlsx roster + set org, role, limit")
+    sp.add_argument("--file", required=True,
+                    help="path to a CSV or .xlsx roster: an email column and an "
+                         "optional group/org-name column (with a header row)")
 
-    sp = sub.add_parser("update-limits", parents=[common],
-                        help="re-materialize limits after editing limits.toml")
+    add("move", "re-materialize members who changed orgs since last run")
+
+    sp = add("reassign", "bulk-move members from a CSV/.xlsx roster to a new org "
+                         "(add to destination + set its role/limit, remove from old org)")
+    sp.add_argument("--file", required=True,
+                    help="path to a CSV or .xlsx roster: an email column and an "
+                         "optional destination group/org-name column (with a header row)")
+
+    sp = add("update-limits", "re-materialize limits after editing limits.toml")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--org", help="org name whose members to re-materialize")
     g.add_argument("--user", help="a single email or user_id")
 
-    sp = sub.add_parser("offboard", parents=[common],
-                        help="remove a user from all orgs + zero limit + leaver role")
+    sp = add("offboard", "remove a user from all orgs + zero limit + leaver role")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--user", help="email or user_id to offboard")
     g.add_argument("--org-dissolved", dest="org_dissolved",
                    help="offboard ALL members of this org")
 
-    sub.add_parser("reconcile", parents=[common],
-                   help="report drift of actual vs desired (+ save a plan)")
-    sub.add_parser("usage", parents=[common],
-                   help="flag users near/at their cap (detection only)")
-    sub.add_parser("coverage", parents=[common],
-                   help="per-org intended-vs-actual coverage report")
+    add("reconcile", "report drift of actual vs desired (+ save a plan)")
+    add("usage", "flag users near/at their cap (detection only)")
+    add("coverage",
+        "per-org report of how many members already match their org's intended "
+        "limit & role (read-only; lists any that don't)")
 
-    sp = sub.add_parser("apply", parents=[common],
-                        help="execute a saved plan (the approval gate)")
+    sp = add("apply", "execute a saved plan (the approval gate)")
     sp.add_argument("plan", help="path to a plan json under state/plans/")
     sp.add_argument("--approved", action="store_true",
                     help="also apply held increases / new grants")
@@ -72,10 +90,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     cmd = args.cmd
     if cmd == "onboard":
-        workflows.onboard(cfg, client, user_id=getattr(args, "user", None),
-                          org=getattr(args, "org", None))
+        workflows.onboard(cfg, client, file=getattr(args, "file", None))
     elif cmd == "move":
         workflows.move_members(cfg, client)
+    elif cmd == "reassign":
+        workflows.reassign(cfg, client, file=getattr(args, "file", None))
     elif cmd == "update-limits":
         workflows.update_limits(cfg, client, org=getattr(args, "org", None),
                                 user_id=getattr(args, "user", None))

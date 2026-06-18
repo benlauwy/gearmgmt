@@ -4,7 +4,7 @@
 Usage:
     DEVIN_SERVICE_USER_TOKEN=<cog_...> python govern.py <command> [--dry-run]
 
-Commands: onboard, move, update-limits, offboard, reconcile, usage, coverage, apply
+Commands: onboard, move, reassign, update-limits, offboard, reconcile, usage, coverage, apply
 
 See README.md for usage.
 """

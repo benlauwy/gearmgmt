@@ -1,0 +1,9 @@
+# Runtime dependencies.
+#
+# The core engine is pure standard library (Python 3.11+). The only external
+# dependency is optional: openpyxl is needed ONLY to read Excel (.xlsx) roster
+# files for `onboard`. CSV rosters need nothing beyond the standard library.
+#
+#   pip install -r requirements.txt
+
+openpyxl>=3.1

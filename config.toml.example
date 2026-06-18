@@ -38,6 +38,16 @@ cycle_days        = 30    # window summed as "this cycle" usage vs the per-user 
 # usage (verify against your billing definition before relying on it).
 products          = []
 
+[invite]
+# `onboard` invites new users from a CSV/.xlsx roster, then adds them to the
+# named org. The invite grants the org's ENTERPRISE role (from roles.toml); the
+# per-org member role below is what new members get inside their org.
+# Provide EITHER org_role_id (exact, preferred) OR org_role_name (resolved
+# against GET /v3/enterprise/roles at runtime). If neither resolves, `onboard`
+# prints the available org roles so you can fill one in.
+org_role_name = "Organization User"
+# org_role_id = "role-REPLACE_WITH_ORG_MEMBER_ROLE_ID"
+
 [api]
 # Cross-cutting resilience: resumable partial-failure handling + retry on rate limit.
 rate_limit_sleep_seconds = 0.1
