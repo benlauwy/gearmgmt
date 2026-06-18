@@ -184,11 +184,19 @@ No command mutates directly. Read-only commands report; action commands write a
   *revokes/downgrades*, org removals).
 - **`apply <plan> --approved`** also runs the gated changes (limit *increases*,
   new role grants).
+- **`apply` (no plan)** applies *every* outstanding plan in `state/plans/`. It
+  lists them and asks once (`[y/N]` — any non-`y` answer aborts) before running;
+  `--approved` still applies to all of them.
 - The gate is **atomic per user**: if any of a user's changes needs approval,
   *none* of that user's changes apply until approved — so a move never lands
   half-done.
 - Every applied mutation is appended to `audit.jsonl`; plans double as a resume
   ledger (per-change status), and rate-limited calls are retried.
+- A plan is **archived to `state/plans/archive/`** once *every* change has landed
+  (so it no longer counts as outstanding). A plan with held/failed changes stays
+  put so you can resume it — e.g. run `apply <plan>` for the decreases, then
+  `apply <plan> --approved` for the increases; it's archived after the second
+  run. `--dry-run` never archives.
 - When an `--approved` run will actually **invite** members, `apply` brackets the
   run with two mandatory prompts: first to **uncheck** *Settings > Enterprise >
   General > "Require SSO for member access"* (invites only work while it's off),
@@ -212,7 +220,7 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `move` | Detect users who changed orgs since last run → plan |
 | `reassign --file PATH` | Bulk-move existing members to a new org from a CSV/`.xlsx` roster: add to destination + set role/limit, remove from old governed org → plan |
 | `offboard --user USER \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role → plan |
-| `apply PLAN [--approved]` | Execute a saved plan (gated, audited, resumable) |
+| `apply [PLAN] [--approved]` | Execute a saved plan (gated, audited, resumable); with no `PLAN`, apply all outstanding plans after a y/N confirm |
 
 `--user` accepts an email or the raw user_id. `onboard --file` and
 `reassign --file` accept a `.csv` or `.xlsx` roster. Global flags (accepted before
@@ -236,7 +244,8 @@ or after the command): `--dry-run`, `--config PATH`.
 
 **Runtime (git-ignored, written by the engine):**
 - `audit.jsonl` — append-only audit log (who/what/when/why/triggered-by).
-- `state/plans/*.json` — saved plans + resume status.
+- `state/plans/*.json` — saved plans + resume status (outstanding plans).
+- `state/plans/archive/*.json` — plans retired here once fully applied.
 - `state/membership.json` — last membership snapshot (for `move`).
 - `state/usage-candidates.json` — last `usage` output.
 

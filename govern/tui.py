@@ -48,6 +48,39 @@ def confirm_yes(message: str, prompt: str = "Press y to continue: ") -> None:
     print()
 
 
+def confirm(message: str, prompt: str = "Proceed? [y/N]: ") -> bool:
+    """Ask a yes/no question; return True only if the operator answers y/Y.
+
+    Unlike :func:`confirm_yes` (a mandatory gate with no "no"), this is a real
+    yes/no: any answer other than y/Y returns False so the caller can abort
+    cleanly. Ctrl+C still aborts hard. On an interactive terminal a single
+    keypress decides (no Enter needed); when stdin isn't a TTY (pipe/CI) we read
+    a line and EOF counts as "no".
+    """
+    print(message)
+
+    # Non-interactive: line read so pipes/CI can still drive it (default No).
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        try:
+            return input(prompt).strip() in ("y", "Y")
+        except EOFError:
+            return False
+
+    import termios
+    import tty
+
+    print(prompt, end="", flush=True)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)  # char-at-a-time, no echo, but keep Ctrl+C working
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    print()
+    return ch in ("y", "Y")
+
+
 def select_from_list(title: str, options: list[str]) -> Optional[str]:
     """Show an arrow-key menu and return the chosen option (or None if cancelled).
 

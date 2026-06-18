@@ -77,8 +77,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
 
-    sp = add("apply", "execute a saved plan (the approval gate)")
-    sp.add_argument("plan", help="path to a plan json under state/plans/")
+    sp = add("apply", "execute a saved plan (the approval gate); with no plan, "
+                      "apply all outstanding plans after a y/N confirm")
+    sp.add_argument("plan", nargs="?",
+                    help="path to a plan json under state/plans/; omit to apply "
+                         "every outstanding plan (asks y/N first)")
     sp.add_argument("--approved", action="store_true",
                     help="also apply held increases / new grants")
 
@@ -108,8 +111,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
     elif cmd == "apply":
-        from .apply import apply_plan
+        from .apply import apply_outstanding, apply_plan
         from .plan import load_plan
-        apply_plan(cfg, client, load_plan(args.plan),
-                   approved=getattr(args, "approved", False), plan_path=args.plan)
+        approved = getattr(args, "approved", False)
+        if args.plan:
+            apply_plan(cfg, client, load_plan(args.plan),
+                       approved=approved, plan_path=args.plan)
+        else:
+            apply_outstanding(cfg, client, approved=approved)
     return 0
