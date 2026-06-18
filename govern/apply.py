@@ -7,6 +7,7 @@ import time
 from . import state
 from .config import Config
 from .plan import Change, Plan
+from .tui import confirm_yes
 
 
 def _user_id_from_invite(resp, email: str) -> str:
@@ -89,6 +90,22 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
     counts = {"applied": 0, "would": 0, "held": 0, "already": 0, "failed": 0}
     held_users = 0
 
+    # Inviting members requires the enterprise's "Require SSO for member access"
+    # setting to be OFF. Invites need approval (so they only run with --approved)
+    # and don't touch the server in dry-run, so only gate on a real, approved run
+    # that still has invites left to send. If we ask the operator to turn it off,
+    # we must also ask them to turn it back on afterwards.
+    pending_invites = [c for c in plan.changes
+                       if c.kind == "user_invite" and c.status != "applied"]
+    gate_sso = approved and not client.dry_run and bool(pending_invites)
+    if gate_sso:
+        confirm_yes(
+            f"\nThis plan invites {len(pending_invites)} new member(s) — action required first\n"
+            "  Open Settings > Enterprise > General and UNCHECK\n"
+            '  "Require SSO for member access" (invites only work while it is off).\n',
+            prompt="Press y once it's unchecked to start applying: ",
+        )
+
     for uid, group in _group_by_user(plan.changes):
         pending = [c for c in group if c.status != "applied"]
         counts["already"] += len(group) - len(pending)
@@ -151,4 +168,13 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
           f"held={counts['held']} already={counts['already']} failed={counts['failed']}")
     if held_users:
         print(f"{held_users} user(s) fully held pending --approved (atomic per user).")
+
+    # Restore the setting we asked the operator to disable for the invites.
+    if gate_sso:
+        confirm_yes(
+            "\nApply finished — action required\n"
+            "  Open Settings > Enterprise > General and re-CHECK\n"
+            '  "Require SSO for member access".\n',
+            prompt="Press y once it's re-checked to finish: ",
+        )
     return plan

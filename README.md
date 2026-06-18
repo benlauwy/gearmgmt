@@ -189,6 +189,12 @@ No command mutates directly. Read-only commands report; action commands write a
   half-done.
 - Every applied mutation is appended to `audit.jsonl`; plans double as a resume
   ledger (per-change status), and rate-limited calls are retried.
+- When an `--approved` run will actually **invite** members, `apply` brackets the
+  run with two mandatory prompts: first to **uncheck** *Settings > Enterprise >
+  General > "Require SSO for member access"* (invites only work while it's off),
+  then to **re-check** it afterwards. Each waits for a `y`/`Y` keypress — any
+  other key is ignored and the prompt stays put. Plans with no invites (and
+  `--dry-run`) skip this.
 
 Add `--dry-run` to any command to simulate without writing anything.
 

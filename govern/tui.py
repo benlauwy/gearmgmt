@@ -13,6 +13,41 @@ class MenuUnavailable(RuntimeError):
     """Raised when an interactive menu can't be shown (e.g. not a TTY)."""
 
 
+def confirm_yes(message: str, prompt: str = "Press y to continue: ") -> None:
+    """Show ``message`` and block until the operator presses ``y``/``Y``.
+
+    The step is mandatory: there is deliberately no "no". Any key other than
+    y/Y is ignored and the message simply stays on screen until y/Y is pressed.
+    On an interactive terminal a single keypress is enough (no Enter needed);
+    Ctrl+C still aborts. When stdin isn't a TTY (pipe/CI) we fall back to a line
+    read (``y`` + Enter).
+    """
+    print(message)
+
+    # Non-interactive: line read so pipes/CI can still drive it.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        while True:
+            try:
+                if input(prompt).strip() in ("y", "Y"):
+                    return
+            except EOFError:
+                raise SystemExit("Aborted: confirmation required but no TTY available.")
+
+    import termios
+    import tty
+
+    print(prompt, end="", flush=True)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)  # char-at-a-time, no echo, but keep Ctrl+C working
+        while sys.stdin.read(1) not in ("y", "Y"):
+            pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    print()
+
+
 def select_from_list(title: str, options: list[str]) -> Optional[str]:
     """Show an arrow-key menu and return the chosen option (or None if cancelled).
 
