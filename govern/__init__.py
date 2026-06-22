@@ -2,7 +2,7 @@
 
 Materializes per-user limits and enterprise roles from policy files
 (limits.toml, roles.toml) with a manual-override exception (overrides.toml),
-and provides reconciliation/reporting (reconcile, usage, coverage).
+and provides reconciliation/reporting (reconcile, usage, coverage, logins).
 
 The engine is diff-first: every action command builds a plan that is then
 executed through the apply gate (auto-applies revokes/downgrades; holds

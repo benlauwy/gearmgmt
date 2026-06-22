@@ -65,17 +65,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     g.add_argument("--org", help="org name whose members to re-materialize")
     g.add_argument("--user", help="a single email or user_id")
 
-    sp = add("offboard", "remove a user from all orgs + zero limit + leaver role")
+    sp = add("offboard", "remove user(s) from all orgs + zero limit + leaver role")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--user", help="email or user_id to offboard")
     g.add_argument("--org-dissolved", dest="org_dissolved",
                    help="offboard ALL members of this org")
+    g.add_argument("--file", help="path to a CSV/.xlsx roster of emails to "
+                                  "offboard in bulk (an email column with a header "
+                                  "row; any group/org column is ignored)")
 
     add("reconcile", "report drift of actual vs desired (+ save a plan)")
     add("usage", "flag users near/at their cap (detection only)")
     add("coverage",
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
+    add("logins",
+        "report how many enterprise members have logged in at least once vs "
+        "never, with a per-org breakdown (read-only; uses the audit log)")
 
     sp = add("apply", "execute a saved plan (the approval gate); with no plan, "
                       "apply all outstanding plans after a y/N confirm")
@@ -103,13 +109,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 user_id=getattr(args, "user", None))
     elif cmd == "offboard":
         workflows.offboard(cfg, client, user_id=getattr(args, "user", None),
-                           org_dissolved=getattr(args, "org_dissolved", None))
+                           org_dissolved=getattr(args, "org_dissolved", None),
+                           file=getattr(args, "file", None))
     elif cmd == "reconcile":
         workflows.reconcile(cfg, client)
     elif cmd == "usage":
         workflows.usage(cfg, client)
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
+    elif cmd == "logins":
+        workflows.logins(cfg, client)
     elif cmd == "apply":
         from .apply import apply_outstanding, apply_plan
         from .plan import load_plan

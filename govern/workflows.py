@@ -1,7 +1,9 @@
 """Workflow orchestration.
 
-Each command builds a Plan (diff-first) and applies it through the apply gate:
-  onboard · move · reassign · update_limits · offboard · reconcile · usage · coverage
+Action commands build a Plan (diff-first) applied through the apply gate:
+  onboard · move · reassign · update_limits · offboard · reconcile
+Read-only reports (mutate nothing; usage/coverage/logins also write no plan):
+  reconcile · usage · coverage · logins
 """
 from __future__ import annotations
 
@@ -14,8 +16,8 @@ from .config import Config
 from .plan import Change, Plan, _limit_kind, diff, save_plan
 from .policy import load_policy, resolve_desired
 from . import roster as roster_mod
-from .state import (diff_membership, load_snapshot, read_actual, save_snapshot,
-                    snapshot_path)
+from .state import (diff_membership, load_snapshot, read_actual, read_members,
+                    save_snapshot, snapshot_path)
 from .tui import MenuUnavailable, select_from_list
 
 
@@ -114,6 +116,26 @@ def _fail_roster(errors: list[str]):
     raise SystemExit(1)
 
 
+def _validate_roster_emails(roster) -> list[str]:
+    """Validate a roster's EMAIL column: well-formed and free of duplicates.
+
+    Returns human-readable problems in row order (empty == clean). This is the
+    email half of roster validation: ``_validate_roster_values`` layers org-name
+    checks on top when a file has an org column, while offboard — which ignores
+    orgs and removes members from every org — uses it directly."""
+    errors: list[str] = []
+    seen: dict[str, int] = {}
+    for i, (email, _org) in enumerate(roster.rows(), start=1):
+        if not roster_mod.is_valid_email(email):
+            errors.append(f"row {i}: invalid email {email!r}")
+            continue
+        key = email.strip().lower()
+        if key in seen:
+            errors.append(f"row {i}: duplicate email {email!r} (also row {seen[key]})")
+        seen[key] = i
+    return errors
+
+
 def _validate_roster_values(roster, *, is_valid_org, org_by_lower) -> list[str]:
     """Validate roster emails (+ org names, when the file has an org column).
 
@@ -121,25 +143,18 @@ def _validate_roster_values(roster, *, is_valid_org, org_by_lower) -> list[str]:
     report them all at once. Shared by the roster-driven commands (onboard,
     reassign); the caller decides what to do with any errors (typically
     ``_fail_roster``, before any prompt or API mutation)."""
-    errors: list[str] = []
-    seen: dict[str, int] = {}
-    for i, (email, org) in enumerate(roster.rows(), start=1):
-        if not roster_mod.is_valid_email(email):
-            errors.append(f"row {i}: invalid email {email!r}")
-        else:
-            key = email.strip().lower()
-            if key in seen:
-                errors.append(f"row {i}: duplicate email {email!r} (also row {seen[key]})")
-            seen[key] = i
-        if roster.has_org_column:
-            if not (org or "").strip():
-                errors.append(f"row {i}: missing group/organization name")
-            elif not is_valid_org(org):
-                if org.strip().lower() not in org_by_lower:
-                    errors.append(f"row {i}: unknown organization {org!r}")
-                else:
-                    errors.append(f"row {i}: organization {org!r} is not governed "
-                                  "(no entry in limits.toml / roles.toml)")
+    errors = _validate_roster_emails(roster)
+    if not roster.has_org_column:
+        return errors
+    for i, (_email, org) in enumerate(roster.rows(), start=1):
+        if not (org or "").strip():
+            errors.append(f"row {i}: missing group/organization name")
+        elif not is_valid_org(org):
+            if org.strip().lower() not in org_by_lower:
+                errors.append(f"row {i}: unknown organization {org!r}")
+            else:
+                errors.append(f"row {i}: organization {org!r} is not governed "
+                              "(no entry in limits.toml / roles.toml)")
     return errors
 
 
@@ -561,15 +576,54 @@ def update_limits(cfg: Config, client, *, org: Optional[str] = None,
     return plan
 
 
+def _offboard_targets_from_file(file: str, actual: dict) -> tuple[list[str], str]:
+    """Resolve a bulk-offboard roster file to the user_ids to offboard.
+
+    The roster is the same CSV/.xlsx shape as onboard/reassign, but offboard only
+    needs the EMAIL column — it removes each member from ALL orgs, so any
+    group/organization column is ignored (with a warning). Emails are validated up
+    front (well-formed, no duplicates) and every one must already be an enterprise
+    user; unknown emails fail before anything changes (use the audit log to
+    confirm anyone already removed). Returns (target user_ids, scope)."""
+    # Offboard ignores orgs, so org-name validity is irrelevant here; a trivial
+    # is_valid_org keeps header/email-column detection working off emails alone.
+    try:
+        roster = roster_mod.parse_roster(file, is_valid_org=lambda _name: False)
+    except roster_mod.RosterError as e:
+        raise SystemExit(f"ERROR: {e}")
+    for w in roster.warnings:
+        print(f"WARNING: {w}")
+    if roster.has_org_column:
+        print("WARNING: offboard removes members from ALL orgs — ignoring the "
+              "group/organization column.")
+
+    errors = _validate_roster_emails(roster)
+    if errors:
+        _fail_roster(errors)
+
+    actual_by_email = {(a.get("email") or "").lower(): uid
+                       for uid, a in actual.items() if a.get("email")}
+    unknown = [f"row {i}: {email} is not an enterprise user "
+               "(nothing to offboard — it may already have been removed)"
+               for i, (email, _org) in enumerate(roster.rows(), start=1)
+               if email.strip().lower() not in actual_by_email]
+    if unknown:
+        _fail_roster(unknown)
+
+    targets = [actual_by_email[email.strip().lower()] for email, _org in roster.rows()]
+    return targets, f"file:{os.path.basename(file)}"
+
+
 def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
-             org_dissolved: Optional[str] = None):
+             org_dissolved: Optional[str] = None, file: Optional[str] = None):
     """Offboard: zero/reclaim the limit, remove the user from ALL orgs, then set
-    the special leaver enterprise role (config.leaver). Use --user for
-    one leaver or --org-dissolved to fan out across all members of a dissolved org.
-    Every change is a revoke/downgrade, so the plan auto-applies (no approval);
-    still diff-first via the apply gate."""
-    if not user_id and not org_dissolved:
-        raise SystemExit("ERROR: offboard requires --user USER_ID or --org-dissolved NAME")
+    the special leaver enterprise role (config.leaver). Use --user for one leaver,
+    --file for a CSV/.xlsx roster of emails (bulk), or --org-dissolved to fan out
+    across all members of a dissolved org. Every change is a revoke/downgrade, so
+    the plan auto-applies (no approval); still diff-first via the apply gate."""
+    if not user_id and not org_dissolved and not file:
+        raise SystemExit("ERROR: offboard requires --user USER_ID, "
+                         "--org-dissolved NAME, or --file PATH")
 
     actual = read_actual(client)
     org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
@@ -581,10 +635,12 @@ def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
     if user_id:
         user_id = _resolve_user_id(actual, user_id)
         targets, scope = [user_id], f"user:{user_id}"
-    else:
+    elif org_dissolved:
         oid = _org_id_by_name(org_index, org_dissolved)
         targets = [uid for uid, a in actual.items() if oid in a["org_ids"]]
         scope = f"org-dissolved:{org_dissolved}"
+    else:
+        targets, scope = _offboard_targets_from_file(file, actual)
 
     changes = []
     for uid in targets:
@@ -834,3 +890,70 @@ def coverage(cfg: Config, client):
     ungoverned = sorted(name for _oid, name in orgs if name not in governed_names)
     if ungoverned:
         print(f"Ungoverned orgs (no policy entry): {', '.join(ungoverned)}")
+
+
+def _pct(n: int, d: int) -> str:
+    """Format n/d as a whole-percent string (0% when there's nothing to divide)."""
+    return f"{(n / d):.0%}" if d else "0%"
+
+
+def logins(cfg: Config, client):
+    """Login-activity report: of all enterprise members, how many have logged in
+    at least once vs never, with a per-org breakdown.
+
+    Read-only. It reads the member list plus the enterprise audit log
+    (action=login, full history) and matches login events back to current
+    members (by user_id, falling back to email); login events for people who are
+    no longer members are ignored. Writes no plan and mutates nothing."""
+    members = read_members(client)
+    org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
+
+    # Set of CURRENT members who have logged in at least once. Match each login
+    # event on user_id first, then fall back to email (case-insensitive) for
+    # events with no user_id; events for non-members are ignored.
+    email_to_uid = {(m["email"] or "").lower(): uid
+                    for uid, m in members.items() if m.get("email")}
+    logged_in: set[str] = set()
+    for ev in client.list_all_audit_logs(action="login"):
+        uid = ev.get("user_id")
+        if uid in members:
+            logged_in.add(uid)
+            continue
+        em = (ev.get("user_email") or "").lower()
+        if em in email_to_uid:
+            logged_in.add(email_to_uid[em])
+
+    total = len(members)
+    n_in = len(logged_in)
+    n_never = total - n_in
+
+    print("=== logins (read-only) ===")
+    print("Source: enterprise audit log, action=login (full history)\n")
+    print(f"Enterprise members: {total}")
+    print(f"  logged in >= once: {n_in} ({_pct(n_in, total)})")
+    print(f"  never logged in:   {n_never} ({_pct(n_never, total)})\n")
+
+    # Per-org breakdown. A member in multiple orgs is counted under each, so these
+    # rows don't sum to the totals above; members in no org are bucketed last.
+    members_by_org: dict[str, list[str]] = {}
+    for uid, m in members.items():
+        for oid in m["org_ids"]:
+            members_by_org.setdefault(oid, []).append(uid)
+
+    def row(label: str, uids: list[str]):
+        ins = sum(1 for u in uids if u in logged_in)
+        never = len(uids) - ins
+        print(f"  {label}: {len(uids)} member(s) | logged in {ins} "
+              f"({_pct(ins, len(uids))}) | never {never} ({_pct(never, len(uids))})")
+
+    print("Per-org breakdown (members in multiple orgs count under each):")
+    for oid in sorted(members_by_org, key=lambda o: org_index.get(o, f"<unknown:{o}>")):
+        row(org_index.get(oid, f"<unknown:{oid}>"), members_by_org[oid])
+    if not members_by_org:
+        print("  (no org memberships)")
+
+    no_org = [uid for uid, m in members.items() if not m["org_ids"]]
+    if no_org:
+        row("(no org)", no_org)
+
+    return {"total": total, "logged_in": n_in, "never": n_never}

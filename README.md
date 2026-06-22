@@ -37,7 +37,8 @@ DEVIN_API_BASE_URL=https://<company>.devinenterprise.com/api
 
 The token's service user needs these enterprise permissions:
 `ViewAccountMembership` (reads), `ManageBilling` (limits),
-`ManageAccountMembership` (invites + roles + org add/remove).
+`ManageAccountMembership` (invites + roles + org add/remove),
+`ManageEnterpriseSettings` (audit log — only the `logins` report needs it).
 
 Run everything via the entrypoint:
 
@@ -145,6 +146,20 @@ leaver role. Every change is a revoke/downgrade, so it all auto-applies (no
 python govern.py offboard --user "jane@company.com"
 python govern.py apply state/plans/offboard-<ts>.json
 ```
+Several people leaving at once? Offboard them in bulk from a CSV/`.xlsx` roster
+of emails (the same file shape as `onboard`/`reassign`). Since offboard removes
+members from **all** orgs, only the email column is used — any group/org column
+is ignored. Emails are validated up front and every one must already be an
+enterprise user; unknown emails fail before anything changes:
+```bash
+python govern.py offboard --file leavers.csv
+python govern.py apply state/plans/offboard-<ts>.json
+```
+```csv
+email
+jane@company.com
+raj@company.com
+```
 Dissolving an entire org? Offboard all of its members at once:
 ```bash
 python govern.py offboard --org-dissolved "Old Team"
@@ -215,16 +230,18 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `reconcile` | Report drift (actual vs desired) across everyone; save a plan |
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
 | `usage` | Flag users near/at their cap; emit upgrade candidates |
+| `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
 | `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` → plan |
 | `move` | Detect users who changed orgs since last run → plan |
 | `reassign --file PATH` | Bulk-move existing members to a new org from a CSV/`.xlsx` roster: add to destination + set role/limit, remove from old governed org → plan |
-| `offboard --user USER \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role → plan |
+| `offboard --user USER \| --file PATH \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role, for one user, a roster of emails, or every member of a dissolved org → plan |
 | `apply [PLAN] [--approved]` | Execute a saved plan (gated, audited, resumable); with no `PLAN`, apply all outstanding plans after a y/N confirm |
 
-`--user` accepts an email or the raw user_id. `onboard --file` and
-`reassign --file` accept a `.csv` or `.xlsx` roster. Global flags (accepted before
-or after the command): `--dry-run`, `--config PATH`.
+`--user` accepts an email or the raw user_id. `onboard --file`,
+`reassign --file`, and `offboard --file` accept a `.csv` or `.xlsx` roster
+(`offboard` uses only the email column). Global flags (accepted before or after
+the command): `--dry-run`, `--config PATH`.
 
 ---
 

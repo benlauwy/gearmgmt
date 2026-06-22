@@ -104,6 +104,19 @@ class DevinClient:
                     "order": order, "first": 200},
         )
 
+    def list_all_audit_logs(self, *, action=None, time_after=None, order="asc") -> list[dict]:
+        """Paginate ALL audit-log entries, optionally filtered to one ``action``.
+
+        The paginating cousin of ``list_audit_logs`` (single page + cursor): it
+        follows ``end_cursor`` to the end and returns the flat list of entries,
+        like the other ``list_*`` reads. With no ``time_after`` the API returns
+        the full available history — so ``action="login"`` yields every login
+        event ever recorded for the enterprise."""
+        return self._paginate(
+            "/v3/enterprise/audit-logs",
+            {"action": action, "time_after": time_after, "order": order},
+        )
+
     # ---- writes (verified) — respect dry_run ----
     def invite_users(self, emails: list[str], enterprise_role_id: str):
         """Bulk-invite new enterprise users by email, granting them an enterprise

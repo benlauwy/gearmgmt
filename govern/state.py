@@ -9,6 +9,48 @@ from typing import Any, Optional
 from .config import Config
 
 
+def _split_role_assignments(member: dict) -> tuple[Optional[dict], dict[str, dict]]:
+    """Split a member's role_assignments into (enterprise_role, {org_id: org_role}).
+
+    An assignment is the single enterprise role when its role_type is
+    "enterprise" or it carries no org_id; every other assignment is an org role
+    keyed by org_id. Shared by read_actual and read_members.
+
+    NOTE: org_ids here may reference orgs absent from the org inventory (orphaned
+    memberships observed live); callers preserve them so reconcile/offboard can
+    act on them.
+    """
+    enterprise_role = None
+    org_roles: dict[str, dict] = {}
+    for a in member.get("role_assignments", []):
+        role = a.get("role") or {}
+        entry = {"role_id": role.get("role_id"), "role_name": role.get("role_name")}
+        if role.get("role_type") == "enterprise" or a.get("org_id") is None:
+            enterprise_role = entry
+        else:
+            org_roles[a["org_id"]] = entry
+    return enterprise_role, org_roles
+
+
+def read_members(client) -> dict[str, dict]:
+    """Return {user_id: {email, name, org_ids}} for every enterprise member.
+
+    A lean cousin of read_actual: one call to list_enterprise_members() and NO
+    per-user limit lookups (read_actual makes one get_user_limit call each). Use
+    it for reports that only need identity + org membership — e.g. the login
+    activity report — and don't care about ACU limits or role ids.
+    """
+    out: dict[str, dict] = {}
+    for m in client.list_enterprise_members():
+        _enterprise_role, org_roles = _split_role_assignments(m)
+        out[m["user_id"]] = {
+            "email": m.get("email"),
+            "name": m.get("name"),
+            "org_ids": sorted(org_roles.keys()),
+        }
+    return out
+
+
 def read_actual(client) -> dict[str, dict]:
     """Return {user_id: {email, name, enterprise_role, org_roles, org_ids,
     limit, limit_set}}.
@@ -24,15 +66,7 @@ def read_actual(client) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for m in client.list_enterprise_members():
         uid = m["user_id"]
-        enterprise_role = None
-        org_roles: dict[str, dict] = {}
-        for a in m.get("role_assignments", []):
-            role = a.get("role") or {}
-            entry = {"role_id": role.get("role_id"), "role_name": role.get("role_name")}
-            if role.get("role_type") == "enterprise" or a.get("org_id") is None:
-                enterprise_role = entry
-            else:
-                org_roles[a["org_id"]] = entry
+        enterprise_role, org_roles = _split_role_assignments(m)
         raw = client.get_user_limit(uid) or {}
         local_agent = raw.get("local_agent") or {}
         out[uid] = {
