@@ -25,6 +25,8 @@ def _client(cfg, dry_run: bool) -> DevinClient:
         max_retries=int(cfg.api.get("max_retries", 5)),
         backoff=float(cfg.api.get("retry_backoff_seconds", 2.0)),
         sleep=float(cfg.api.get("rate_limit_sleep_seconds", 0.1)),
+        read_concurrency=int(cfg.api.get("read_concurrency", 8)),
+        apply_concurrency=int(cfg.api.get("apply_concurrency", 8)),
     )
 
 
@@ -79,9 +81,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     add("coverage",
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
-    add("logins",
-        "report how many enterprise members have logged in at least once vs "
-        "never, with a per-org breakdown (read-only; uses the audit log)")
+    sp = add("logins",
+             "report how many enterprise members have logged in at least once vs "
+             "never, with a per-org breakdown (read-only; uses the audit log)")
+    sp.add_argument("--dump-never", dest="dump_never", metavar="PATH",
+                    help="also write the email addresses of members who have "
+                         "never logged in to PATH, one per line")
 
     sp = add("apply", "execute a saved plan (the approval gate); with no plan, "
                       "apply all outstanding plans after a y/N confirm")
@@ -118,7 +123,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
     elif cmd == "logins":
-        workflows.logins(cfg, client)
+        workflows.logins(cfg, client, dump_never=getattr(args, "dump_never", None))
     elif cmd == "apply":
         from .apply import apply_outstanding, apply_plan
         from .plan import load_plan

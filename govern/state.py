@@ -1,12 +1,18 @@
 """Actual-state reads, membership snapshots, and the append-only audit log."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import sys
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .config import Config
+
+# Fallback parallelism for per-user reads when the client carries no
+# ``read_concurrency`` (e.g. a mock/stub). Real clients set it from [api].
+DEFAULT_READ_CONCURRENCY = 8
 
 
 def _split_role_assignments(member: dict) -> tuple[Optional[dict], dict[str, dict]]:
@@ -51,12 +57,75 @@ def read_members(client) -> dict[str, dict]:
     return out
 
 
-def read_actual(client) -> dict[str, dict]:
+def _stderr_progress(label: str, total: int) -> Callable[[int], None]:
+    """Return a progress callback that rewrites a single status line on stderr.
+
+    Renders only when stderr is a TTY (so redirected/piped output stays clean)
+    and never touches stdout — keeping the actual report pristine. The returned
+    callback is meant to be driven from the MAIN thread as work completes, so the
+    parallel readers below never write to the console themselves; that keeps
+    output safe (no interleaving) even though the fetches run concurrently.
+    """
+    if not sys.stderr.isatty() or total <= 0:
+        return lambda _done: None
+
+    width = len(str(total))
+
+    def report(done: int) -> None:
+        end = "\n" if done >= total else ""
+        sys.stderr.write(f"\r{label} {done:>{width}}/{total}{end}")
+        sys.stderr.flush()
+
+    return report
+
+
+def _read_user_limits(client, user_ids: list[str], *, workers: int,
+                      progress: Optional[Callable[[int], None]] = None,
+                      ) -> dict[str, dict]:
+    """Fetch each user's raw ACU-limit payload, concurrently.
+
+    Returns {user_id: raw_limit_dict} ({} when the user has no override). The
+    per-user get_user_limit calls are network-latency bound, so they run on a
+    thread pool (DevinClient holds no per-request state, so it is thread-safe).
+    Results are collected — and ``progress`` invoked — on the CALLING thread
+    only, so no worker ever writes to stdout/stderr. Errors propagate just as the
+    old serial loop did (the first failing fetch raises).
+    """
+    out: dict[str, dict] = {}
+    total = len(user_ids)
+    if total == 0:
+        return out
+    done = 0
+    if workers <= 1:  # serial fallback (single-worker config / debugging)
+        for uid in user_ids:
+            out[uid] = client.get_user_limit(uid) or {}
+            done += 1
+            if progress:
+                progress(done)
+        return out
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(client.get_user_limit, uid): uid for uid in user_ids}
+        for fut in concurrent.futures.as_completed(futures):
+            uid = futures[fut]
+            out[uid] = fut.result() or {}
+            done += 1
+            if progress:
+                progress(done)
+    return out
+
+
+def read_actual(client, *, workers: Optional[int] = None,
+                progress: bool = True) -> dict[str, dict]:
     """Return {user_id: {email, name, enterprise_role, org_roles, org_ids,
     limit, limit_set}}.
 
     Enterprise + org roles come from client.list_enterprise_members() (one call);
     the per-user Local Agent limit from client.get_user_limit() (one call each).
+    Those per-user lookups dominate wall-clock time on large populations, so they
+    are fetched in parallel across ``workers`` threads (defaulting to the
+    client's ``read_concurrency``); pass ``workers=1`` for a serial fetch. A
+    transient progress line is shown on stderr (TTY only) unless ``progress`` is
+    False.
 
     NOTE: role_assignments may reference org_ids absent from the org inventory
     (orphaned memberships observed live) — they are preserved in org_ids so
@@ -67,17 +136,23 @@ def read_actual(client) -> dict[str, dict]:
     for m in client.list_enterprise_members():
         uid = m["user_id"]
         enterprise_role, org_roles = _split_role_assignments(m)
-        raw = client.get_user_limit(uid) or {}
-        local_agent = raw.get("local_agent") or {}
         out[uid] = {
             "email": m.get("email"),
             "name": m.get("name"),
             "enterprise_role": enterprise_role,
             "org_roles": org_roles,
             "org_ids": sorted(org_roles.keys()),
-            "limit": local_agent.get("cycle_acu_limit"),
-            "limit_set": "local_agent" in raw,
+            "limit": None,
+            "limit_set": False,
         }
+    if workers is None:
+        workers = getattr(client, "read_concurrency", DEFAULT_READ_CONCURRENCY)
+    report = _stderr_progress("fetching limits", len(out)) if progress else None
+    limits = _read_user_limits(client, list(out), workers=workers, progress=report)
+    for uid, raw in limits.items():
+        local_agent = raw.get("local_agent") or {}
+        out[uid]["limit"] = local_agent.get("cycle_acu_limit")
+        out[uid]["limit_set"] = "local_agent" in raw
     return out
 
 

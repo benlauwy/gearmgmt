@@ -1,14 +1,21 @@
 """Apply a plan: approval gate, resumable execution, audit logging."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import threading
 import time
 
 from . import state
 from .config import REPO_ROOT, Config
 from .plan import Change, Plan, load_plan
 from .tui import confirm, confirm_yes
+
+# Fallback parallelism for applying a plan's per-user groups when the client
+# carries no ``apply_concurrency`` (e.g. a mock/stub). Real clients set it from
+# [api].apply_concurrency.
+DEFAULT_APPLY_CONCURRENCY = 8
 
 
 def _user_id_from_invite(resp, email: str) -> str:
@@ -120,6 +127,85 @@ def _group_by_user(changes) -> "list[tuple[str, list]]":
     return [(key, groups[key]) for key in order]
 
 
+def _apply_user_group(client, cfg: Config, plan: Plan, uid: str, group: list,
+                      *, approved: bool, triggered_by, plan_path,
+                      io_lock: threading.Lock):
+    """Apply ONE user's pending changes, in order — the unit of parallelism.
+
+    User groups are independent, so apply_plan fans them out across a thread pool;
+    WITHIN a group the changes stay strictly sequential because a new invitee's
+    org-add/limit can only run once the invite has assigned a user_id. To stay
+    safe under concurrency this worker NEVER prints directly: it buffers every
+    console line into ``lines`` (the caller prints them, in user order, so nothing
+    interleaves) and serializes the file-writing side effects — plan persistence
+    and the audit append — behind the shared ``io_lock``. Returns
+    ``(lines, counts, held_users)`` for the caller to merge; ``counts`` mirrors
+    the apply_plan tally keys and ``held_users`` is 1 when the whole user is held.
+    """
+    lines: list[str] = []
+    counts = {"applied": 0, "would": 0, "held": 0, "already": 0, "failed": 0}
+
+    pending = [c for c in group if c.status != "applied"]
+    counts["already"] += len(group) - len(pending)
+    if not pending:
+        return lines, counts, 0
+
+    lines.append(f"{uid}:")
+    # Atomic gate: hold the whole user if any pending change needs approval.
+    if not approved and any(c.needs_approval for c in pending):
+        counts["held"] += len(pending)
+        blockers = sorted({c.kind for c in pending if c.needs_approval})
+        for c in pending:
+            lines.append(f"  [HELD]  {c.kind:14} {c.field:16} {c.before} -> {c.after}")
+        lines.append(f"  -> entire user held pending --approved (needs: {', '.join(blockers)})")
+        return lines, counts, 1
+
+    resolved_uid = ""  # set once this invitee's user_invite is applied
+    for c in pending:
+        # A new invitee's org-add/limit changes can only run once the invite
+        # has assigned a user_id. If the invite hasn't (yet) succeeded, skip.
+        if c.kind != "user_invite" and not c.user_id:
+            if not resolved_uid:
+                c.status, c.error = "failed", "skipped: invite did not complete"
+                counts["failed"] += 1
+                lines.append(f"  [SKIP]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: invite incomplete")
+                with io_lock:
+                    _persist(plan, plan_path)
+                continue
+            c.user_id = resolved_uid
+        try:
+            new_uid = _apply_change(client, c)
+        except Exception as e:  # noqa: BLE001 - record and continue (resumable)
+            c.status, c.error = "failed", str(e)
+            counts["failed"] += 1
+            lines.append(f"  [FAIL]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: {e}")
+            with io_lock:
+                _persist(plan, plan_path)
+            continue
+        if c.kind == "user_invite":
+            # Thread the freshly-assigned id (or a dry-run placeholder) into
+            # this invitee's remaining org-add/limit changes.
+            resolved_uid = new_uid or "<dry-run-user>"
+            for other in pending:
+                if not other.user_id:
+                    other.user_id = resolved_uid
+        if client.dry_run:
+            counts["would"] += 1
+            lines.append(f"  [DRY]   {c.kind:14} {c.field:16} {c.before} -> {c.after}")
+        else:
+            c.status, c.error = "applied", None
+            counts["applied"] += 1
+            lines.append(f"  [OK]    {c.kind:14} {c.field:16} {c.before} -> {c.after}")
+            with io_lock:
+                state.audit(cfg, action=c.kind, user_id=c.user_id or uid, field=c.field,
+                            before=c.before, after=c.after, reason=c.reason,
+                            triggered_by=triggered_by, dry_run=False)
+                _persist(plan, plan_path)
+            if client.sleep:
+                time.sleep(client.sleep)
+    return lines, counts, 0
+
+
 def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
                triggered_by=None, plan_path=None) -> Plan:
     """Execute a plan (the second half of the plan -> apply approval gate).
@@ -133,6 +219,10 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
     - Changes already "applied" are skipped (resume after partial failure).
     - Each real mutation is recorded to the audit log; client.dry_run is honored
       (dry-run neither mutates nor audits) and client.sleep paces the calls.
+    - Per-USER groups run concurrently (client.apply_concurrency workers; 1 =
+      serial); changes within a user stay sequential. Output stays in roster
+      order and audit/plan writes are serialized, so the result is identical to a
+      serial apply — just faster on large rosters.
     """
     triggered_by = triggered_by or plan.triggered_by
     counts = {"applied": 0, "would": 0, "held": 0, "already": 0, "failed": 0}
@@ -154,63 +244,40 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
             prompt="Press y once it's unchecked to start applying: ",
         )
 
-    for uid, group in _group_by_user(plan.changes):
-        pending = [c for c in group if c.status != "applied"]
-        counts["already"] += len(group) - len(pending)
-        if not pending:
-            continue
+    # Apply each user's changes as an independent unit. Users have no ordering
+    # dependency on one another, so the groups fan out across ``apply_concurrency``
+    # workers (the per-user mutations are network-latency bound); WITHIN a user the
+    # changes stay strictly sequential (see _apply_user_group). Each worker buffers
+    # its output and returns it so the MAIN thread prints whole user blocks in
+    # roster order — concurrent calls never interleave on the console — while file
+    # writes are serialized behind ``io_lock``.
+    groups = _group_by_user(plan.changes)
+    workers = getattr(client, "apply_concurrency", DEFAULT_APPLY_CONCURRENCY)
+    io_lock = threading.Lock()
 
-        print(f"{uid}:")
-        # Atomic gate: hold the whole user if any pending change needs approval.
-        if not approved and any(c.needs_approval for c in pending):
-            held_users += 1
-            counts["held"] += len(pending)
-            blockers = sorted({c.kind for c in pending if c.needs_approval})
-            for c in pending:
-                print(f"  [HELD]  {c.kind:14} {c.field:16} {c.before} -> {c.after}")
-            print(f"  -> entire user held pending --approved (needs: {', '.join(blockers)})")
-            continue
+    def run(item):
+        uid, group = item
+        return _apply_user_group(
+            client, cfg, plan, uid, group, approved=approved,
+            triggered_by=triggered_by, plan_path=plan_path, io_lock=io_lock)
 
-        resolved_uid = ""  # set once this invitee's user_invite is applied
-        for c in pending:
-            # A new invitee's org-add/limit changes can only run once the invite
-            # has assigned a user_id. If the invite hasn't (yet) succeeded, skip.
-            if c.kind != "user_invite" and not c.user_id:
-                if not resolved_uid:
-                    c.status, c.error = "failed", "skipped: invite did not complete"
-                    counts["failed"] += 1
-                    print(f"  [SKIP]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: invite incomplete")
-                    _persist(plan, plan_path)
-                    continue
-                c.user_id = resolved_uid
-            try:
-                new_uid = _apply_change(client, c)
-            except Exception as e:  # noqa: BLE001 - record and continue (resumable)
-                c.status, c.error = "failed", str(e)
-                counts["failed"] += 1
-                print(f"  [FAIL]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: {e}")
-                _persist(plan, plan_path)
-                continue
-            if c.kind == "user_invite":
-                # Thread the freshly-assigned id (or a dry-run placeholder) into
-                # this invitee's remaining org-add/limit changes.
-                resolved_uid = new_uid or "<dry-run-user>"
-                for other in pending:
-                    if not other.user_id:
-                        other.user_id = resolved_uid
-            if client.dry_run:
-                counts["would"] += 1
-                print(f"  [DRY]   {c.kind:14} {c.field:16} {c.before} -> {c.after}")
-            else:
-                c.status, c.error = "applied", None
-                counts["applied"] += 1
-                print(f"  [OK]    {c.kind:14} {c.field:16} {c.before} -> {c.after}")
-                state.audit(cfg, action=c.kind, user_id=c.user_id or uid, field=c.field,
-                            before=c.before, after=c.after, reason=c.reason,
-                            triggered_by=triggered_by, dry_run=False)
-                _persist(plan, plan_path)
-                if client.sleep:
-                    time.sleep(client.sleep)
+    pool = None
+    if workers <= 1 or len(groups) <= 1:  # serial (single worker / nothing to fan out)
+        results = (run(item) for item in groups)
+    else:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        futures = [pool.submit(run, item) for item in groups]
+        results = (f.result() for f in futures)  # consumed in submission order
+    try:
+        for lines, deltas, held in results:
+            for line in lines:
+                print(line)
+            for key, val in deltas.items():
+                counts[key] += val
+            held_users += held
+    finally:
+        if pool is not None:
+            pool.shutdown()
 
     print(f"\nApply summary: applied={counts['applied']} would(dry)={counts['would']} "
           f"held={counts['held']} already={counts['already']} failed={counts['failed']}")

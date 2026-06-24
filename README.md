@@ -230,7 +230,7 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `reconcile` | Report drift (actual vs desired) across everyone; save a plan |
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
 | `usage` | Flag users near/at their cap; emit upgrade candidates |
-| `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown |
+| `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
 | `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` → plan |
 | `move` | Detect users who changed orgs since last run → plan |

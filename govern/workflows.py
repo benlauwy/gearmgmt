@@ -704,7 +704,7 @@ def reconcile(cfg: Config, client, *, auto_correct: bool = False):
         print("Drift detail:")
         for c in changes:
             tag = "APPROVAL" if c.needs_approval else "auto"
-            print(f"  [{tag:8}] {c.kind:14} {email(c.user_id):34} {c.before} -> {c.after}  ({c.source})")
+            print(f"  [{tag:8}] {c.kind:14} {email(c.user_id):34} {c.before} -> {c.after}  ({c.reason})")
         print()
 
     exempt = [uid for uid, d in desired.items() if d.source == "admin-exempt"]
@@ -897,14 +897,19 @@ def _pct(n: int, d: int) -> str:
     return f"{(n / d):.0%}" if d else "0%"
 
 
-def logins(cfg: Config, client):
+def logins(cfg: Config, client, dump_never: Optional[str] = None):
     """Login-activity report: of all enterprise members, how many have logged in
     at least once vs never, with a per-org breakdown.
 
     Read-only. It reads the member list plus the enterprise audit log
     (action=login, full history) and matches login events back to current
     members (by user_id, falling back to email); login events for people who are
-    no longer members are ignored. Writes no plan and mutates nothing."""
+    no longer members are ignored. Writes no plan and mutates nothing.
+
+    ``dump_never`` (the --dump-never PATH flag) additionally writes the email
+    addresses of members who have never logged in to PATH, one per line. That's
+    an explicit, non-governed report artifact, so it's written even on a
+    --dry-run (mirroring how ``usage`` always emits its candidates file)."""
     members = read_members(client)
     org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
 
@@ -955,5 +960,22 @@ def logins(cfg: Config, client):
     no_org = [uid for uid, m in members.items() if not m["org_ids"]]
     if no_org:
         row("(no org)", no_org)
+
+    if dump_never:
+        # Emails of members who never logged in, sorted & de-duped. Members
+        # without an email on file can't be dumped, so we count them separately
+        # rather than emitting blank lines.
+        never_emails = sorted({(m["email"] or "").lower()
+                               for uid, m in members.items()
+                               if uid not in logged_in and m.get("email")})
+        missing = n_never - len(never_emails)
+        d = os.path.dirname(dump_never)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(dump_never, "w", encoding="utf-8") as f:
+            f.write("".join(e + "\n" for e in never_emails))
+        print(f"\nWrote {len(never_emails)} never-logged-in email(s) to: {dump_never}")
+        if missing:
+            print(f"  ({missing} never-logged-in member(s) had no email on file)")
 
     return {"total": total, "logged_in": n_in, "never": n_never}

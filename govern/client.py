@@ -15,13 +15,23 @@ from urllib.parse import urlencode, quote
 
 class DevinClient:
     def __init__(self, token: str, base_url: str, *, dry_run: bool = False,
-                 max_retries: int = 5, backoff: float = 2.0, sleep: float = 0.1):
+                 max_retries: int = 5, backoff: float = 2.0, sleep: float = 0.1,
+                 read_concurrency: int = 8, apply_concurrency: int = 8):
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
         self.max_retries = max_retries
         self.backoff = backoff
         self.sleep = sleep  # inter-mutation delay used by the applier
+        # Parallel workers for network-latency-bound per-user reads (read_actual).
+        # Each request is independent, so concurrent calls are safe; 429s are
+        # still retried with backoff in _request.
+        self.read_concurrency = read_concurrency
+        # Parallel workers for applying a plan: the per-USER change groups in
+        # apply_plan run concurrently (changes WITHIN a user stay sequential).
+        # Like reads, the mutations are network-latency bound and independent
+        # across users; 429s are retried with backoff in _request.
+        self.apply_concurrency = apply_concurrency
 
     # ---- low-level ----
     def _request(self, method: str, path: str, *, body=None, params=None):
