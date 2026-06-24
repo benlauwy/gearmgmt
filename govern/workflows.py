@@ -17,7 +17,7 @@ from .plan import Change, Plan, _limit_kind, diff, save_plan
 from .policy import load_policy, resolve_desired
 from . import roster as roster_mod
 from .state import (diff_membership, load_snapshot, read_actual, read_members,
-                    save_snapshot, snapshot_path)
+                    read_utilizations, save_snapshot, snapshot_path)
 from .tui import MenuUnavailable, select_from_list
 
 
@@ -800,9 +800,13 @@ def usage(cfg: Config, client):
     if not capped:
         print("No users have a numeric per-user cap set — nothing to evaluate.")
 
+    # Fetch every capped user's utilization in parallel (network-latency bound,
+    # like read_actual's limit reads); the per-user summary below is pure/local.
+    util = read_utilizations(client, [uid for uid, _ in capped],
+                             time_after=after, time_before=now)
     rows, candidates = [], []
     for uid, a in capped:
-        data = client.get_user_utilization(uid, time_after=after, time_before=now)
+        data = util.get(uid) or {}
         st = _utilization_status(data.get("consumption_by_date", []), a["limit"],
                                  near_cap_pct=near, trend_window_days=trend_window,
                                  products=products, now=now)

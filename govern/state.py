@@ -156,6 +156,50 @@ def read_actual(client, *, workers: Optional[int] = None,
     return out
 
 
+def read_utilizations(client, user_ids: list[str], *, time_after: int,
+                      time_before: int, workers: Optional[int] = None,
+                      progress: bool = True) -> dict[str, dict]:
+    """Return {user_id: raw_utilization_dict} for each user, fetched in parallel.
+
+    One get_user_utilization call per user. Like read_actual's per-user limit
+    fetches, these are network-latency bound and independent, so they run on a
+    thread pool (DevinClient holds no per-request state, so it is thread-safe)
+    sized by the client's ``read_concurrency`` (pass ``workers=1`` for a serial
+    fetch). Results are collected — and the transient stderr progress line
+    (TTY only, unless ``progress`` is False) advanced — on the CALLING thread
+    only, so no worker writes to the console. Errors propagate (first failure
+    raises), just as the old serial loop in `usage` did.
+    """
+    out: dict[str, dict] = {}
+    total = len(user_ids)
+    if total == 0:
+        return out
+    if workers is None:
+        workers = getattr(client, "read_concurrency", DEFAULT_READ_CONCURRENCY)
+    report = _stderr_progress("fetching usage", total) if progress else None
+    done = 0
+    if workers <= 1:  # serial fallback (single-worker config / debugging)
+        for uid in user_ids:
+            out[uid] = client.get_user_utilization(
+                uid, time_after=time_after, time_before=time_before) or {}
+            done += 1
+            if report:
+                report(done)
+        return out
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(client.get_user_utilization, uid, time_after, time_before): uid
+            for uid in user_ids
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            uid = futures[fut]
+            out[uid] = fut.result() or {}
+            done += 1
+            if report:
+                report(done)
+    return out
+
+
 # ---- membership snapshots (reactive move/offboard via snapshot-diff) ----
 def snapshot_path(cfg: Config) -> str:
     return os.path.join(cfg.path("state_dir"), "membership.json")
