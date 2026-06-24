@@ -77,7 +77,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                                   "row; any group/org column is ignored)")
 
     add("reconcile", "report drift of actual vs desired (+ save a plan)")
-    add("usage", "flag users near/at their cap (detection only)")
+    sp = add("usage", "flag users near/at their cap (detection only)")
+    sp.add_argument("--reverse", action="store_true",
+                    help="reverse the sort order (lowest usage first instead of "
+                         "the default highest-first)")
     add("coverage",
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
@@ -119,7 +122,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif cmd == "reconcile":
         workflows.reconcile(cfg, client)
     elif cmd == "usage":
-        workflows.usage(cfg, client)
+        workflows.usage(cfg, client, reverse=getattr(args, "reverse", False))
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
     elif cmd == "logins":

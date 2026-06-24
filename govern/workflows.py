@@ -776,10 +776,13 @@ def _utilization_status(days: list, cap, *, near_cap_pct: float,
             "recent": recent, "prior": prior, "trend": trend, "flagged": flagged}
 
 
-def usage(cfg: Config, client):
+def usage(cfg: Config, client, reverse: bool = False):
     """Flag users near/at their cap with a usage trend. Detection only:
     it emits candidates for the single-user `update-limits` upgrade and never
-    mutates."""
+    mutates.
+
+    Rows are printed sorted by percent-of-cap, highest first; ``reverse`` (the
+    --reverse flag) flips that to lowest first."""
     u = cfg.utilization
     near = float(u.get("near_cap_pct", 0.8))
     trend_window = int(u.get("trend_window_days", 14))
@@ -816,7 +819,7 @@ def usage(cfg: Config, client):
                                "consumption": st["consumption"], "cap": st["cap"],
                                "pct": st["pct"], "trend": st["trend"]})
 
-    rows.sort(key=lambda r: r[2]["pct"] or 0, reverse=True)
+    rows.sort(key=lambda r: r[2]["pct"] or 0, reverse=not reverse)
     for uid, a, st in rows:
         flag = "NEAR/AT CAP" if st["flagged"] else "ok"
         print(f"  [{flag:11}] {a.get('email') or uid:34} "
