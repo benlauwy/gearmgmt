@@ -220,9 +220,10 @@ def apply_plan(cfg: Config, client, plan: Plan, *, approved: bool = False,
     - Each real mutation is recorded to the audit log; client.dry_run is honored
       (dry-run neither mutates nor audits) and client.sleep paces the calls.
     - Per-USER groups run concurrently (client.apply_concurrency workers; 1 =
-      serial); changes within a user stay sequential. Output stays in roster
-      order and audit/plan writes are serialized, so the result is identical to a
-      serial apply — just faster on large rosters.
+      serial) for EVERY plan kind — onboard/offboard/reassign and reconcile
+      alike; changes within a user stay sequential. Output stays in plan order
+      and audit/plan writes are serialized, so the result is identical to a
+      serial apply — just faster on large plans.
     """
     triggered_by = triggered_by or plan.triggered_by
     counts = {"applied": 0, "would": 0, "held": 0, "already": 0, "failed": 0}

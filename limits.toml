@@ -4,7 +4,7 @@
 # (unlimited) -- TOML has no bare null, so quote it, e.g. "Some Org" = "null".
 # Edit the defaults below as needed.
 
-"IDE Light"        = 18
+"IDE Light"        = 24
 "IDE Standard"     = 36
 "IDE Super"        = 72
 "CLI IDE Light"    = 180

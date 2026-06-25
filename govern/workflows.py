@@ -776,13 +776,22 @@ def _utilization_status(days: list, cap, *, near_cap_pct: float,
             "recent": recent, "prior": prior, "trend": trend, "flagged": flagged}
 
 
-def usage(cfg: Config, client, reverse: bool = False):
+def usage(cfg: Config, client, *, reverse: bool = False,
+          user_id: Optional[str] = None):
     """Flag users near/at their cap with a usage trend. Detection only:
     it emits candidates for the single-user `update-limits` upgrade and never
     mutates.
 
     Rows are printed sorted by percent-of-cap, highest first; ``reverse`` (the
-    --reverse flag) flips that to lowest first."""
+    --reverse flag) flips that to lowest first.
+
+    ``user_id`` (the --user flag, an email or user_id) narrows the report to a
+    single member — a spot-check that prints just that user's row. The read stays
+    lean (like `lookup`): it resolves via the member list and fetches ONLY that
+    user's limit, not the whole population's like read_actual. It never overwrites
+    the shared state/usage-candidates.json (that stays the last FULL-population
+    output, the upgrade worklist); if the member has no numeric cap there is
+    nothing to evaluate against and it says so."""
     u = cfg.utilization
     near = float(u.get("near_cap_pct", 0.8))
     trend_window = int(u.get("trend_window_days", 14))
@@ -791,7 +800,21 @@ def usage(cfg: Config, client, reverse: bool = False):
 
     now = int(time.time())
     after = now - cycle_days * 86400
-    actual = read_actual(client)
+
+    # A single-user spot-check stays lean (like `lookup`): resolve via the member
+    # list (one call, no per-user limit reads) and fetch ONLY that user's limit,
+    # rather than triggering read_actual's whole-population limit fan-out.
+    single = user_id is not None
+    if single:
+        members = read_members(client)
+        user_id = _resolve_user_id(members, user_id)
+        raw = client.get_user_limit(user_id) or {}
+        local_agent = raw.get("local_agent") or {}
+        actual = {user_id: {"email": members[user_id].get("email"),
+                            "limit": local_agent.get("cycle_acu_limit"),
+                            "limit_set": "local_agent" in raw}}
+    else:
+        actual = read_actual(client)
 
     print("=== usage / cap detection (detection only) ===")
     src = ", ".join(products) if products else "total_acus"
@@ -801,6 +824,10 @@ def usage(cfg: Config, client, reverse: bool = False):
     capped = [(uid, a) for uid, a in actual.items()
               if isinstance(a.get("limit"), (int, float)) and a["limit"] > 0]
     if not capped:
+        if single:
+            who = actual[user_id].get("email") or user_id
+            print(f"{who} has no numeric per-user cap set — nothing to evaluate.")
+            return []
         print("No users have a numeric per-user cap set — nothing to evaluate.")
 
     # Fetch every capped user's utilization in parallel (network-latency bound,
@@ -825,6 +852,14 @@ def usage(cfg: Config, client, reverse: bool = False):
         print(f"  [{flag:11}] {a.get('email') or uid:34} "
               f"{st['consumption']:.1f}/{st['cap']} ({(st['pct'] or 0):.0%}) "
               f"trend={st['trend']} (recent {st['recent']:.1f} vs prior {st['prior']:.1f})")
+
+    # A single-user spot-check never clobbers the shared full-population worklist;
+    # it just prints the row above (+ an upgrade hint when flagged) and returns.
+    if single:
+        for c in candidates:
+            print(f"\n  upgrade: python govern.py update-limits --user {c['user_id']}"
+                  f"   # {c['email']} at {c['pct']:.0%}")
+        return candidates
 
     os.makedirs(cfg.path("state_dir"), exist_ok=True)
     out = os.path.join(cfg.path("state_dir"), "usage-candidates.json")

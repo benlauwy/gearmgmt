@@ -81,6 +81,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     sp.add_argument("--reverse", action="store_true",
                     help="reverse the sort order (lowest usage first instead of "
                          "the default highest-first)")
+    sp.add_argument("--user", help="restrict the report to a single member "
+                                   "(an email or user_id); prints just that "
+                                   "user's row and never overwrites the shared "
+                                   "state/usage-candidates.json")
     add("coverage",
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
@@ -133,7 +137,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif cmd == "reconcile":
         workflows.reconcile(cfg, client)
     elif cmd == "usage":
-        workflows.usage(cfg, client, reverse=getattr(args, "reverse", False))
+        workflows.usage(cfg, client, reverse=getattr(args, "reverse", False),
+                        user_id=getattr(args, "user", None))
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
     elif cmd == "capacity":

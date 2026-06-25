@@ -58,8 +58,9 @@ retry_backoff_seconds    = 2.0
 # faster; lower (1 = serial) if you hit rate limits — 429s are retried with
 # backoff regardless.
 read_concurrency         = 8
-# Parallel workers for APPLYING a plan: each user's changes (invite -> org-add ->
-# limit) run concurrently across users, while changes within a user stay
-# sequential. Speeds up large onboard/offboard/reassign applies. Lower (1 =
-# serial) if you hit rate limits; 429s are retried with backoff regardless.
+# Parallel workers for APPLYING a plan: each user's changes (e.g. invite ->
+# org-add -> limit) run concurrently across users, while changes within a user
+# stay sequential. Applies to EVERY plan kind — large onboard/offboard/reassign
+# and reconcile applies alike. Lower (1 = serial) if you hit rate limits; 429s
+# are retried with backoff regardless.
 apply_concurrency        = 8

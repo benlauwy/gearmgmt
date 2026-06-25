@@ -133,10 +133,13 @@ raise someone, bump their tier (move them to a higher org, or edit `limits.toml`
 / `overrides.toml`), then `reconcile` to materialize the increase:
 ```bash
 python govern.py usage                                             # flag near/at-cap users
+python govern.py usage --user alice@example.com                    # spot-check one member
 # ...raise their org/limit in policy, then:
 python govern.py reconcile
 python govern.py apply state/plans/reconcile-<ts>.json --approved  # the increase needs --approved
 ```
+For a **day-by-day** breakdown of one member's consumption (rather than
+`usage`'s single cycle-total-vs-cap view), use `report.py` — see section 7.
 
 ### A person leaves → `offboard`
 `offboard` zeros their limit, removes them from **every** org, and sets the
@@ -230,7 +233,7 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `reconcile` | Report drift (actual vs desired) across everyone; save a plan |
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
 | `capacity` | Sum every member's per-user monthly ACU limit into one enterprise-wide total (read-only); unlimited & unset members are counted separately, not folded into the total |
-| `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first |
+| `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first. `--user EMAIL_OR_USER_ID` restricts the report to a single member (a spot-check) — it prints just that row and does **not** overwrite the shared `state/usage-candidates.json` worklist |
 | `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
 | `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s) + ACU limit. An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line as `user_id<TAB>limit` (the per-user monthly Local Agent ACU cap, or `unlimited`/`unset`). Pipe through `cut -f1` to feed a shell variable/pipeline with just the id |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
@@ -266,7 +269,7 @@ the command): `--dry-run`, `--config PATH`.
 - `state/plans/*.json` — saved plans + resume status (outstanding plans).
 - `state/plans/archive/*.json` — plans retired here once fully applied.
 - `state/membership.json` — last membership snapshot (for `move`).
-- `state/usage-candidates.json` — last `usage` output.
+- `state/usage-candidates.json` — last full-population `usage` output (`usage --user` spot-checks don't touch it).
 
 ---
 
@@ -282,3 +285,39 @@ the command): `--dry-run`, `--config PATH`.
   (direct org-role assignments only) — manage those via IDP configuration.
 - **`move` is reactive** via snapshot diffing; run it on a schedule. The first run
   just records a baseline.
+
+---
+
+## 7. Daily ACU consumption report (`report.py`)
+
+A read-only companion CLI, separate from the `govern.py` plan/apply engine:
+given **one** member, it lists their **daily Local Agent ACU consumption**. With
+no range flags it reports the **current month** (the 1st through today).
+
+```bash
+python report.py --user alice@example.com                      # current month, day by day
+python report.py --user alice@example.com --month 2026-05      # a whole past month
+python report.py --user alice@example.com --from 2026-06-01 --to 2026-06-15
+python report.py --user alice@example.com --by-product         # add devin/cascade/terminal/review columns
+python report.py --user alice@example.com --json               # machine-readable
+```
+
+- **`--user`** is an email or a raw user_id (required). An email can resolve to
+  several identities (e.g. a pending `email|...` invite plus an `okta|Org|...`
+  SSO id); their daily series are **summed** so you get the person's true total.
+- **Range** — all dates are UTC days, matching the API's daily buckets:
+  - no flags → the current month (1st .. today);
+  - `--month YYYY-MM` → a whole calendar month (capped at today for this month);
+  - `--from` / `--to YYYY-MM-DD` → an explicit range (`--from` defaults to the
+    1st of the current month, `--to` to today). `--month` can't be combined with
+    `--from`/`--to`.
+- Every day in the range is listed even when it had **no** consumption
+  (zero-filled), followed by a **total**, so the daily series and its sum are
+  unambiguous. `--by-product` adds per-product columns; `--json` emits the same
+  data machine-readably.
+- Reads only: one member-list call to resolve the user, then one
+  daily-consumption call per matched identity. Token + host come from `.env`,
+  operational config from `config.toml` — exactly like `govern.py`.
+
+Where `govern.py usage` flags *who* is near their **cap** (one cycle total vs
+their limit), `report.py` shows the **day-by-day** breakdown for a single member.
