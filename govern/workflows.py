@@ -986,3 +986,39 @@ def logins(cfg: Config, client, dump_never: Optional[str] = None):
             print(f"  ({missing} never-logged-in member(s) had no email on file)")
 
     return {"total": total, "logged_in": n_in, "never": n_never}
+
+
+def lookup(cfg: Config, client, *, user_id: Optional[str] = None):
+    """Resolve a member by email (or user_id) and print their user_id(s).
+
+    Read-only and lean: one list_enterprise_members() call via read_members (no
+    per-user limit lookups). The Devin API can hold MORE THAN ONE identity for
+    the same person — e.g. a pending ``email|<hash>`` invite alongside the
+    ``okta|<Org>|<id>`` (or ``user-<uuid>``) identity minted once they
+    authenticate via SSO — so a single email can map to several user_ids. Unlike
+    the strict resolver the action commands use (``_resolve_user_id``, which
+    fails on ambiguity so they never touch the wrong identity), lookup prints
+    EVERY matching user_id, one per line, so the SSO identity (e.g.
+    ``okta|Cognition|00u...``) is always surfaced. A value that is itself a known
+    user_id is echoed back; an unknown value exits non-zero.
+
+    Only bare user_ids are written to stdout so the output can feed a shell
+    pipeline/variable, e.g.::
+
+        UID=$(python govern.py lookup --user alice@example.com)   # 1 identity
+
+    Returns the sorted list of matched user_ids."""
+    if not user_id:
+        raise SystemExit("ERROR: lookup requires --user EMAIL_OR_USER_ID")
+    members = read_members(client)
+    if user_id in members:          # an exact user_id — echo it back
+        matches = [user_id]
+    else:                           # else every member whose email matches
+        matches = sorted(uid for uid, m in members.items()
+                         if (m.get("email") or "").lower() == user_id.lower())
+    if not matches:
+        raise SystemExit(f"ERROR: no user matching {user_id!r} "
+                         f"(give an email or the user_id)")
+    for uid in matches:
+        print(uid)
+    return matches

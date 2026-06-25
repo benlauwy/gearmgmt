@@ -62,7 +62,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="path to a CSV or .xlsx roster: an email column and an "
                          "optional destination group/org-name column (with a header row)")
 
-    sp = add("update-limits", "re-materialize limits after editing limits.toml")
+    sp = add("update-limits", "re-materialize limits after editing limits.toml / overrides.toml")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--org", help="org name whose members to re-materialize")
     g.add_argument("--user", help="a single email or user_id")
@@ -90,6 +90,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     sp.add_argument("--dump-never", dest="dump_never", metavar="PATH",
                     help="also write the email addresses of members who have "
                          "never logged in to PATH, one per line")
+
+    sp = add("lookup", "print the user_id(s) for a member by email/user_id "
+                       "(read-only; lists every matching identity)")
+    sp.add_argument("--user", required=True,
+                    help="an email or user_id to resolve; prints every matching "
+                         "user_id (one per line), e.g. the okta|Org|... SSO "
+                         "identity plus any pending email|... invite")
 
     sp = add("apply", "execute a saved plan (the approval gate); with no plan, "
                       "apply all outstanding plans after a y/N confirm")
@@ -127,6 +134,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         workflows.coverage(cfg, client)
     elif cmd == "logins":
         workflows.logins(cfg, client, dump_never=getattr(args, "dump_never", None))
+    elif cmd == "lookup":
+        workflows.lookup(cfg, client, user_id=getattr(args, "user", None))
     elif cmd == "apply":
         from .apply import apply_outstanding, apply_plan
         from .plan import load_plan

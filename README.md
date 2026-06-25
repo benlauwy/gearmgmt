@@ -231,8 +231,9 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
 | `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first |
 | `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
+| `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s). An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line (bare ids, so it can feed a shell variable/pipeline) |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
-| `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` → plan |
+| `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` / `overrides.toml` → plan |
 | `move` | Detect users who changed orgs since last run → plan |
 | `reassign --file PATH` | Bulk-move existing members to a new org from a CSV/`.xlsx` roster: add to destination + set role/limit, remove from old governed org → plan |
 | `offboard --user USER \| --file PATH \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role, for one user, a roster of emails, or every member of a dissolved org → plan |
