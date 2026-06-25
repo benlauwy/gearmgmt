@@ -838,6 +838,43 @@ def usage(cfg: Config, client, reverse: bool = False):
     return candidates
 
 
+def capacity(cfg: Config, client):
+    """Total provisioned ACU: sum every member's per-user monthly Local Agent
+    ACU limit into a single enterprise-wide figure (the answer to "if I took
+    everyone and added up their monthly limit"). Read-only — it reads each
+    user's current limit (like `usage`/`coverage`) and only prints; it writes no
+    plan and mutates nothing.
+
+    Only numeric per-user caps are summable, so members whose limit is
+    *unlimited* (an explicit no-cap override) or *unset* (no override at all)
+    can't be folded into the total — they are counted and reported separately
+    so the headline figure isn't silently undercounting uncapped usage."""
+    actual = read_actual(client)
+
+    numeric = [a["limit"] for a in actual.values()
+               if isinstance(a["limit"], (int, float))]
+    unlimited = sum(1 for a in actual.values()
+                    if a["limit_set"] and a["limit"] is None)
+    unset = sum(1 for a in actual.values() if not a["limit_set"])
+    total = sum(numeric)
+    total_str = f"{int(total):,}" if float(total).is_integer() else f"{total:,.1f}"
+    w = len(str(len(actual)))
+
+    print("=== capacity (read-only) ===")
+    print("Sum of every member's per-user monthly Local Agent ACU limit.\n")
+    print(f"Population: {len(actual)} member(s)")
+    print(f"  with a numeric monthly cap : {len(numeric):>{w}}")
+    print(f"  unlimited (explicit no-cap): {unlimited:>{w}}")
+    print(f"  unset (no override)        : {unset:>{w}}")
+    print(f"\nTOTAL monthly ACU limit: {total_str}"
+          f"   (sum of {len(numeric)} numeric per-user cap(s))")
+    if unlimited:
+        print(f"Note: {unlimited} uncapped (unlimited) member(s) are NOT in the "
+              f"total — their usage has no ceiling.")
+    return {"total": total, "numeric": len(numeric),
+            "unlimited": unlimited, "unset": unset, "population": len(actual)}
+
+
 def coverage(cfg: Config, client):
     """Per-org compliance report: for each governed org, show its intended limit
     and role and how many of its (non-admin) members already match them, listing
@@ -989,25 +1026,30 @@ def logins(cfg: Config, client, dump_never: Optional[str] = None):
 
 
 def lookup(cfg: Config, client, *, user_id: Optional[str] = None):
-    """Resolve a member by email (or user_id) and print their user_id(s).
+    """Resolve a member by email (or user_id) and print their user_id(s) + ACU limit.
 
-    Read-only and lean: one list_enterprise_members() call via read_members (no
-    per-user limit lookups). The Devin API can hold MORE THAN ONE identity for
-    the same person — e.g. a pending ``email|<hash>`` invite alongside the
-    ``okta|<Org>|<id>`` (or ``user-<uuid>``) identity minted once they
-    authenticate via SSO — so a single email can map to several user_ids. Unlike
-    the strict resolver the action commands use (``_resolve_user_id``, which
-    fails on ambiguity so they never touch the wrong identity), lookup prints
-    EVERY matching user_id, one per line, so the SSO identity (e.g.
-    ``okta|Cognition|00u...``) is always surfaced. A value that is itself a known
-    user_id is echoed back; an unknown value exits non-zero.
+    The Devin API can hold MORE THAN ONE identity for the same person — e.g. a
+    pending ``email|<hash>`` invite alongside the ``okta|<Org>|<id>`` (or
+    ``user-<uuid>``) identity minted once they authenticate via SSO — so a single
+    email can map to several user_ids. Unlike the strict resolver the action
+    commands use (``_resolve_user_id``, which fails on ambiguity so they never
+    touch the wrong identity), lookup prints EVERY matching user_id, one per
+    line, so the SSO identity (e.g. ``okta|Cognition|00u...``) is always
+    surfaced. A value that is itself a known user_id is echoed back; an unknown
+    value exits non-zero.
 
-    Only bare user_ids are written to stdout so the output can feed a shell
-    pipeline/variable, e.g.::
+    Reads stay lean: one list_enterprise_members() call (via read_members) plus
+    one get_user_limit() call per MATCHED identity (usually 1–2) — not the whole
+    population like read_actual. Each identity's limit is its per-user monthly
+    Local Agent ACU cap: a number, ``unlimited`` for an explicit no-cap
+    override, or ``unset`` when no override exists.
 
-        UID=$(python govern.py lookup --user alice@example.com)   # 1 identity
+    Output is ``<user_id><TAB><ACU limit>`` per line, so a pipeline can still
+    grab just the id with ``cut -f1``, e.g.::
 
-    Returns the sorted list of matched user_ids."""
+        UID=$(python govern.py lookup --user alice@example.com | cut -f1)
+
+    Returns the ``[(user_id, acu_limit_str), ...]`` rows in user_id order."""
     if not user_id:
         raise SystemExit("ERROR: lookup requires --user EMAIL_OR_USER_ID")
     members = read_members(client)
@@ -1019,6 +1061,11 @@ def lookup(cfg: Config, client, *, user_id: Optional[str] = None):
     if not matches:
         raise SystemExit(f"ERROR: no user matching {user_id!r} "
                          f"(give an email or the user_id)")
-    for uid in matches:
-        print(uid)
-    return matches
+    rows = []
+    for uid in matches:             # one get_user_limit per match (usually 1–2)
+        raw = client.get_user_limit(uid) or {}
+        local_agent = raw.get("local_agent") or {}
+        limit = _fmt_limit(local_agent.get("cycle_acu_limit"), "local_agent" in raw)
+        rows.append((uid, limit))
+        print(f"{uid}\t{limit}")
+    return rows

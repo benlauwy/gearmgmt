@@ -229,9 +229,10 @@ Add `--dry-run` to any command to simulate without writing anything.
 |---|---|
 | `reconcile` | Report drift (actual vs desired) across everyone; save a plan |
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
+| `capacity` | Sum every member's per-user monthly ACU limit into one enterprise-wide total (read-only); unlimited & unset members are counted separately, not folded into the total |
 | `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first |
 | `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
-| `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s). An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line (bare ids, so it can feed a shell variable/pipeline) |
+| `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s) + ACU limit. An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line as `user_id<TAB>limit` (the per-user monthly Local Agent ACU cap, or `unlimited`/`unset`). Pipe through `cut -f1` to feed a shell variable/pipeline with just the id |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
 | `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` / `overrides.toml` → plan |
 | `move` | Detect users who changed orgs since last run → plan |

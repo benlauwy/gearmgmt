@@ -84,6 +84,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     add("coverage",
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
+    add("capacity",
+        "sum every member's per-user monthly ACU limit into one enterprise-wide "
+        "total (read-only; counts unlimited/unset members separately)")
     sp = add("logins",
              "report how many enterprise members have logged in at least once vs "
              "never, with a per-org breakdown (read-only; uses the audit log)")
@@ -91,12 +94,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="also write the email addresses of members who have "
                          "never logged in to PATH, one per line")
 
-    sp = add("lookup", "print the user_id(s) for a member by email/user_id "
-                       "(read-only; lists every matching identity)")
+    sp = add("lookup", "print the user_id(s) + ACU limit for a member by "
+                       "email/user_id (read-only; lists every matching identity)")
     sp.add_argument("--user", required=True,
                     help="an email or user_id to resolve; prints every matching "
-                         "user_id (one per line), e.g. the okta|Org|... SSO "
-                         "identity plus any pending email|... invite")
+                         "user_id with its ACU limit (one 'user_id<TAB>limit' per "
+                         "line), e.g. the okta|Org|... SSO identity plus any "
+                         "pending email|... invite")
 
     sp = add("apply", "execute a saved plan (the approval gate); with no plan, "
                       "apply all outstanding plans after a y/N confirm")
@@ -132,6 +136,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         workflows.usage(cfg, client, reverse=getattr(args, "reverse", False))
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
+    elif cmd == "capacity":
+        workflows.capacity(cfg, client)
     elif cmd == "logins":
         workflows.logins(cfg, client, dump_never=getattr(args, "dump_never", None))
     elif cmd == "lookup":
