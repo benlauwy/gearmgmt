@@ -5,8 +5,8 @@
 # Edit the defaults below as needed.
 
 "IDE Light"        = 24
-"IDE Standard"     = 36
-"IDE Super"        = 72
+"IDE Standard"     = 48
+"IDE Super"        = 96
 "CLI IDE Light"    = 180
 "CLI IDE Standard" = 360
 "CLI IDE Super"    = 720

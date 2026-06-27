@@ -85,6 +85,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                                    "(an email or user_id); prints just that "
                                    "user's row and never overwrites the shared "
                                    "state/usage-candidates.json")
+    sp.add_argument("--export", metavar="PATH",
+                    help="also write the full usage table to PATH; the file "
+                         "format is chosen from the extension — .csv/.tsv for "
+                         "delimited text or .xlsx for Excel (.xlsx needs "
+                         "openpyxl). Works with --user too")
     add("coverage",
         "per-org report of how many members already match their org's intended "
         "limit & role (read-only; lists any that don't)")
@@ -138,7 +143,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         workflows.reconcile(cfg, client)
     elif cmd == "usage":
         workflows.usage(cfg, client, reverse=getattr(args, "reverse", False),
-                        user_id=getattr(args, "user", None))
+                        user_id=getattr(args, "user", None),
+                        export=getattr(args, "export", None))
     elif cmd == "coverage":
         workflows.coverage(cfg, client)
     elif cmd == "capacity":

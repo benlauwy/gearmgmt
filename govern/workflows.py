@@ -7,6 +7,7 @@ Read-only reports (mutate nothing; usage/coverage/logins also write no plan):
 """
 from __future__ import annotations
 
+import csv
 import json
 import os
 import time
@@ -776,8 +777,59 @@ def _utilization_status(days: list, cap, *, near_cap_pct: float,
             "recent": recent, "prior": prior, "trend": trend, "flagged": flagged}
 
 
+def _export_format(path: str) -> str:
+    """Map an export filename's extension to a writer format, mirroring
+    ``roster.read_rows`` on the read side so the supported types line up:
+    ``.csv``/``.txt`` -> ``"csv"``, ``.tsv`` -> ``"tsv"``, ``.xlsx`` -> ``"xlsx"``.
+    Anything we can't write (legacy Excel, an unknown/missing extension) is a
+    clean error rather than a silent wrong-format write."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".csv", ".txt"):
+        return "csv"
+    if ext == ".tsv":
+        return "tsv"
+    if ext == ".xlsx":
+        return "xlsx"
+    if ext in (".xls", ".xlsm", ".xlsb"):
+        raise SystemExit(
+            f"ERROR: unsupported export format {ext!r}; save as .xlsx (or .csv)")
+    raise SystemExit(
+        f"ERROR: cannot infer an export format from "
+        f"{ext or '(no extension)'!r}; use a .csv or .xlsx filename")
+
+
+def _write_table(path: str, header: list, rows: list) -> None:
+    """Write ``header`` + ``rows`` to ``path`` as CSV/TSV or Excel, choosing the
+    format from the extension (see :func:`_export_format`). Excel goes through
+    ``openpyxl`` (lazy import, same guidance as the roster reader) so CSV-only
+    users never need the dependency. Parent directories are created as needed."""
+    fmt = _export_format(path)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    if fmt in ("csv", "tsv"):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter="\t" if fmt == "tsv" else ",")
+            w.writerow(header)
+            w.writerows(rows)
+        return
+    try:
+        from openpyxl import Workbook
+    except ModuleNotFoundError as e:  # pragma: no cover - depends on install
+        raise SystemExit(
+            "ERROR: writing .xlsx requires openpyxl "
+            "(pip install -r requirements.txt); alternatively export to .csv") from e
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "usage"
+    ws.append(list(header))
+    for r in rows:
+        ws.append(list(r))
+    wb.save(path)
+
+
 def usage(cfg: Config, client, *, reverse: bool = False,
-          user_id: Optional[str] = None):
+          user_id: Optional[str] = None, export: Optional[str] = None):
     """Flag users near/at their cap with a usage trend. Detection only:
     it emits candidates for the single-user `update-limits` upgrade and never
     mutates.
@@ -791,7 +843,17 @@ def usage(cfg: Config, client, *, reverse: bool = False,
     user's limit, not the whole population's like read_actual. It never overwrites
     the shared state/usage-candidates.json (that stays the last FULL-population
     output, the upgrade worklist); if the member has no numeric cap there is
-    nothing to evaluate against and it says so."""
+    nothing to evaluate against and it says so.
+
+    ``export`` (the --export PATH flag) additionally writes the full usage table
+    (every row shown above, not just the flagged candidates) to PATH. The file
+    format is chosen from the extension — .csv/.tsv for delimited text, .xlsx for
+    Excel (which needs openpyxl). It works in both the full and --user spot-check
+    modes, and is independent of the state/usage-candidates.json worklist."""
+    # Fail fast on an unwritable --export extension before any network reads.
+    if export:
+        _export_format(export)
+
     u = cfg.utilization
     near = float(u.get("near_cap_pct", 0.8))
     trend_window = int(u.get("trend_window_days", 14))
@@ -827,6 +889,8 @@ def usage(cfg: Config, client, *, reverse: bool = False,
         if single:
             who = actual[user_id].get("email") or user_id
             print(f"{who} has no numeric per-user cap set — nothing to evaluate.")
+            if export:
+                print(f"(--export {export}: nothing written — no cap to report.)")
             return []
         print("No users have a numeric per-user cap set — nothing to evaluate.")
 
@@ -852,6 +916,20 @@ def usage(cfg: Config, client, *, reverse: bool = False,
         print(f"  [{flag:11}] {a.get('email') or uid:34} "
               f"{st['consumption']:.1f}/{st['cap']} ({(st['pct'] or 0):.0%}) "
               f"trend={st['trend']} (recent {st['recent']:.1f} vs prior {st['prior']:.1f})")
+
+    # --export writes the FULL table (every row above), independent of the flagged
+    # upgrade worklist below; format is picked from the extension (.csv/.xlsx).
+    if export:
+        header = ["email", "user_id", "status", "consumption", "cap",
+                  "pct_of_cap", "trend", "recent_window_acus", "prior_window_acus"]
+        table = [[a.get("email") or "", uid,
+                  "NEAR/AT CAP" if st["flagged"] else "ok",
+                  round(st["consumption"], 4), st["cap"],
+                  round(st["pct"], 4) if st["pct"] is not None else "",
+                  st["trend"], round(st["recent"], 4), round(st["prior"], 4)]
+                 for uid, a, st in rows]
+        _write_table(export, header, table)
+        print(f"\nExported {len(table)} usage row(s) to: {export}")
 
     # A single-user spot-check never clobbers the shared full-population worklist;
     # it just prints the row above (+ an upgrade hint when flagged) and returns.
