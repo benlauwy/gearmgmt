@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 from govern.apply import (apply_outstanding, apply_plan, list_outstanding_plans)
 from govern.plan import Change, Plan, save_plan
 from conftest import FakeClient, read_audit

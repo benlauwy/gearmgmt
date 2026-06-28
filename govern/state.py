@@ -38,6 +38,11 @@ def _split_role_assignments(member: dict) -> tuple[Optional[dict], dict[str, dic
     return enterprise_role, org_roles
 
 
+def read_org_index(client) -> dict[str, str]:
+    """Return {org_id: name} for every enterprise organization (one call)."""
+    return {o["org_id"]: o["name"] for o in client.list_organizations()}
+
+
 def read_members(client) -> dict[str, dict]:
     """Return {user_id: {email, name, org_ids}} for every enterprise member.
 
@@ -55,6 +60,44 @@ def read_members(client) -> dict[str, dict]:
             "org_ids": sorted(org_roles.keys()),
         }
     return out
+
+
+def resolve_identities(index: dict, value: str) -> list[str]:
+    """Resolve a value (a user_id or an email) to ALL matching user_ids.
+
+    A known user_id resolves to itself; otherwise every member whose email
+    matches case-insensitively — an email can map to several identities (e.g. a
+    pending ``email|...`` invite alongside an authenticated ``okta|...`` id), so
+    every match is returned (sorted). Exits cleanly when nothing matches.
+    ``index`` is any {user_id: {... "email" ...}} map (read_members/read_actual).
+    """
+    if value in index:
+        return [value]
+    matches = sorted(uid for uid, m in index.items()
+                     if (m.get("email") or "").lower() == value.lower())
+    if not matches:
+        raise SystemExit(f"ERROR: no user matching {value!r} "
+                         f"(give an email or the user_id)")
+    return matches
+
+
+def resolve_one(index: dict, value: str) -> str:
+    """Resolve a value (a user_id or an email) to EXACTLY one user_id.
+
+    The strict resolver the action commands use so they never touch the wrong
+    identity: a known user_id passes through; an email must match exactly one
+    member. Exits cleanly on no match or (defensively) an ambiguous email.
+    """
+    if value in index:
+        return value
+    matches = [uid for uid, m in index.items()
+               if (m.get("email") or "").lower() == value.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise SystemExit(f"ERROR: no user matching {value!r} "
+                         f"(give an email or the user_id)")
+    raise SystemExit(f"ERROR: email {value!r} matches multiple users: {matches}")
 
 
 def _stderr_progress(label: str, total: int) -> Callable[[int], None]:

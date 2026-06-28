@@ -56,7 +56,7 @@ class FakeClient:
 
     def __init__(self, *, dry_run=False, apply_concurrency=1, read_concurrency=1,
                  sleep=0, invite_uid="user-new", fail_on=None, members=None,
-                 limits=None, utilizations=None):
+                 limits=None, utilizations=None, orgs=None, roles=None):
         self.dry_run = dry_run
         self.apply_concurrency = apply_concurrency
         self.read_concurrency = read_concurrency
@@ -66,6 +66,9 @@ class FakeClient:
         self._members = members or []
         self._limits = limits or {}
         self._utilizations = utilizations or {}
+        # orgs: {org_id: name}; roles: list of role dicts (for list_roles).
+        self._orgs = dict(orgs or {})
+        self._roles = list(roles or [])
         self.calls: list[tuple] = []
 
     def _maybe_fail(self, name):
@@ -111,11 +114,57 @@ class FakeClient:
     def list_enterprise_members(self):
         return list(self._members)
 
+    def list_organizations(self):
+        return [{"org_id": oid, "name": name} for oid, name in self._orgs.items()]
+
+    def list_roles(self):
+        return list(self._roles)
+
     def get_user_limit(self, user_id):
         return dict(self._limits.get(user_id, {}))
 
     def get_user_utilization(self, user_id, time_after=None, time_before=None):
         return dict(self._utilizations.get(user_id, {}))
+
+
+def _toml_value(v) -> str:
+    return str(v) if isinstance(v, int) and not isinstance(v, bool) else '"' + str(v) + '"'
+
+
+def write_policy(cfg, *, limits=None, roles=None, overrides=None) -> None:
+    """Write limits/roles/overrides TOML to the paths configured on ``cfg``.
+
+    ``limits``/``roles`` are flat {org_name: value} maps (limit ints or the
+    string "null"; role ids as strings). ``overrides`` is {user_id: {field:
+    value}}. Keys are quoted so org names with spaces and pipe-bearing user_ids
+    serialize correctly.
+    """
+    with open(cfg.path("limits_policy"), "w", encoding="utf-8") as f:
+        for k, v in (limits or {}).items():
+            f.write(f'"{k}" = {_toml_value(v)}\n')
+    with open(cfg.path("roles_policy"), "w", encoding="utf-8") as f:
+        for k, v in (roles or {}).items():
+            f.write(f'"{k}" = {_toml_value(v)}\n')
+    with open(cfg.path("overrides"), "w", encoding="utf-8") as f:
+        for uid, fields in (overrides or {}).items():
+            f.write(f'["{uid}"]\n')
+            for k, v in fields.items():
+                f.write(f"{k} = {_toml_value(v)}\n")
+
+
+# ---- enterprise-member builders (the list_enterprise_members shape) ----
+def ent_role(role_id, name="Ent"):
+    return {"role": {"role_id": role_id, "role_name": name, "role_type": "enterprise"}}
+
+
+def org_role(org_id, role_id, name="Org User"):
+    return {"org_id": org_id,
+            "role": {"role_id": role_id, "role_name": name, "role_type": "org"}}
+
+
+def member(user_id, email, assignments, name=None):
+    return {"user_id": user_id, "email": email, "name": name or user_id,
+            "role_assignments": list(assignments)}
 
 
 def read_audit(cfg) -> list[dict]:

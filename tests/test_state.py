@@ -1,9 +1,11 @@
 """Actual-state reads, role-assignment splitting, membership snapshot diffing."""
 from __future__ import annotations
 
+import pytest
+
 from govern.state import (_split_role_assignments, diff_membership,
                           load_snapshot, read_actual, read_members,
-                          save_snapshot)
+                          resolve_identities, resolve_one, save_snapshot)
 from conftest import FakeClient
 
 
@@ -104,3 +106,42 @@ def test_snapshot_save_then_load(cfg):
     snap = {"u1": ["o1"], "u2": ["o1", "o2"]}
     save_snapshot(cfg, snap)
     assert load_snapshot(cfg) == snap
+
+
+# --- identity resolvers -----------------------------------------------------
+def _index():
+    return {"user-1": {"email": "a@x.com"}, "user-2": {"email": "b@x.com"}}
+
+
+def test_resolve_one_passthrough_user_id():
+    assert resolve_one(_index(), "user-1") == "user-1"
+
+
+def test_resolve_one_by_email_case_insensitive():
+    assert resolve_one(_index(), "A@X.COM") == "user-1"
+
+
+def test_resolve_one_unknown_exits():
+    with pytest.raises(SystemExit):
+        resolve_one(_index(), "missing@x.com")
+
+
+def test_resolve_one_ambiguous_email_exits():
+    dup = {"u1": {"email": "dup@x.com"}, "u2": {"email": "dup@x.com"}}
+    with pytest.raises(SystemExit):
+        resolve_one(dup, "dup@x.com")
+
+
+def test_resolve_identities_returns_all_matches_sorted():
+    dup = {"u2": {"email": "dup@x.com"}, "u1": {"email": "dup@x.com"},
+           "u3": {"email": "other@x.com"}}
+    assert resolve_identities(dup, "dup@x.com") == ["u1", "u2"]   # sorted, both ids
+
+
+def test_resolve_identities_user_id_passthrough():
+    assert resolve_identities(_index(), "user-2") == ["user-2"]
+
+
+def test_resolve_identities_unknown_exits():
+    with pytest.raises(SystemExit):
+        resolve_identities(_index(), "nobody@x.com")

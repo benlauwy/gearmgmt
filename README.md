@@ -60,7 +60,7 @@ works* (next section) for the approval gate.
 
 The four commands below cover the everyday lifecycle — **onboard → reconcile →
 usage → offboard**. See *Commands* (section 4) for the full set, including
-`coverage`, `update-limits`, `move`, and `reassign`.
+`coverage`, `move`, and `reassign`.
 
 ### New people join → `onboard`
 `onboard` **invites** users from a roster file (CSV or `.xlsx`) and materializes
@@ -237,14 +237,13 @@ Add `--dry-run` to any command to simulate without writing anything.
 
 | Command | What it does |
 |---|---|
-| `reconcile` | Report drift (actual vs desired) across everyone; save a plan |
+| `reconcile [--user USER \| --org NAME] [--limits-only]` | Report drift (actual vs desired) and save a plan. Covers **everyone** and both dimensions (limits + roles) by default; scope it to one `--user`/`--org`, and/or pass `--limits-only` to reconcile just ACU limits. `reconcile --user USER --limits-only` is the usage-driven single-user upgrade |
 | `coverage` | Per-org intended-vs-actual limit & role coverage |
 | `capacity` | Sum every member's per-user monthly ACU limit into one enterprise-wide total (read-only); unlimited & unset members are counted separately, not folded into the total |
 | `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first. `--user EMAIL_OR_USER_ID` restricts the report to a single member (a spot-check) — it prints just that row and does **not** overwrite the shared `state/usage-candidates.json` worklist. `--export PATH` also writes the full table (all rows, not just candidates) as CSV or Excel, chosen by the extension (`.csv`/`.tsv` or `.xlsx`; Excel needs openpyxl) |
 | `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
 | `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s) + ACU limit. An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line as `user_id<TAB>limit` (the per-user monthly Local Agent ACU cap, or `unlimited`/`unset`). Pipe through `cut -f1` to feed a shell variable/pipeline with just the id |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
-| `update-limits --org NAME \| --user USER` | Re-materialize limits after editing `limits.toml` / `overrides.toml` → plan |
 | `move` | Detect users who changed orgs since last run → plan |
 | `reassign --file PATH` | Bulk-move existing members to a new org from a CSV/`.xlsx` roster: add to destination + set role/limit, remove from old governed org → plan |
 | `offboard --user USER \| --file PATH \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role, for one user, a roster of emails, or every member of a dissolved org → plan |

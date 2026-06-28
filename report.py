@@ -34,23 +34,12 @@ from typing import Optional
 
 from govern.client import DevinClient
 from govern.config import load_config
-from govern.state import read_members
+from govern.state import read_members, resolve_identities
 
 # The daily endpoint splits ACUs into these products; keep a stable column order
 # and append any unknown ones (defensively) after them.
 PRODUCT_ORDER = ["devin", "cascade", "terminal", "review"]
 DAY = 86400
-
-
-def _client(cfg) -> DevinClient:
-    """Build a client from config (retry/concurrency settings), like cli._client."""
-    return DevinClient(
-        cfg.token, cfg.base_url,
-        max_retries=int(cfg.api.get("max_retries", 5)),
-        backoff=float(cfg.api.get("retry_backoff_seconds", 2.0)),
-        sleep=float(cfg.api.get("rate_limit_sleep_seconds", 0.1)),
-        read_concurrency=int(cfg.api.get("read_concurrency", 8)),
-    )
 
 
 def _parse_date(s: str) -> date:
@@ -98,20 +87,6 @@ def _bucket_date(ts: int) -> date:
     """The calendar day a daily bucket belongs to. Buckets start at 08:00 UTC
     (midnight UTC-8), whose UTC date is exactly that consumption day."""
     return datetime.fromtimestamp(ts, tz=timezone.utc).date()
-
-
-def _resolve_identities(members: dict, value: str) -> list[str]:
-    """A known user_id resolves to itself; otherwise every member whose email
-    matches (case-insensitive). An email can hold several identities, so this
-    returns them all (their consumption is summed) rather than failing."""
-    if value in members:
-        return [value]
-    matches = sorted(uid for uid, m in members.items()
-                     if (m.get("email") or "").lower() == value.lower())
-    if not matches:
-        raise SystemExit(f"ERROR: no user matching {value!r} "
-                         f"(give an email or the user_id)")
-    return matches
 
 
 def _collect(client, ids: list[str], start: date, end: date):
@@ -170,13 +145,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config(args.config)
     if not cfg.token:
         p.error("DEVIN_SERVICE_USER_TOKEN not set (see .env / .env.example)")
-    client = _client(cfg)
+    client = DevinClient.from_config(cfg)
 
     today = datetime.now(timezone.utc).date()
     start, end, range_label = _resolve_range(args, today)
 
     members = read_members(client)
-    ids = _resolve_identities(members, args.user)
+    ids = resolve_identities(members, args.user)
     email = next((members[i].get("email") for i in ids if members[i].get("email")), None)
 
     totals, per_product, product_cols = _collect(client, ids, start, end)

@@ -5,9 +5,10 @@ import csv
 
 import pytest
 
+from govern.plan import Change
 from govern.workflows import (_export_format, _fmt_limit, _is_admin,
-                              _org_id_by_name, _pct, _resolve_user_id,
-                              _utilization_status, _write_table)
+                              _org_id_by_name, _pct, _render_change, _tag,
+                              _utilization_status, _where, _write_table)
 
 NOW = 1_000_000
 DAY = 86400
@@ -58,30 +59,6 @@ def test_products_filter_restricts_consumption():
     # With a product filter we count only those products, not the acus total.
     st = _status(days, cap=100, products=["cascade", "terminal"])
     assert st["consumption"] == 10
-
-
-# --- _resolve_user_id (strict) ----------------------------------------------
-def _actual():
-    return {"user-1": {"email": "a@x.com"}, "user-2": {"email": "b@x.com"}}
-
-
-def test_resolve_by_user_id_passthrough():
-    assert _resolve_user_id(_actual(), "user-1") == "user-1"
-
-
-def test_resolve_by_email_case_insensitive():
-    assert _resolve_user_id(_actual(), "A@X.COM") == "user-1"
-
-
-def test_resolve_unknown_exits():
-    with pytest.raises(SystemExit):
-        _resolve_user_id(_actual(), "missing@x.com")
-
-
-def test_resolve_ambiguous_email_exits():
-    dup = {"u1": {"email": "dup@x.com"}, "u2": {"email": "dup@x.com"}}
-    with pytest.raises(SystemExit):
-        _resolve_user_id(dup, "dup@x.com")
 
 
 # --- _org_id_by_name --------------------------------------------------------
@@ -163,3 +140,46 @@ def test_is_admin_matches_role_name_substring_case_insensitive():
     assert _is_admin(user, ["admin"]) is True
     assert _is_admin({"enterprise_role": {"role_name": "Member"}}, ["admin"]) is False
     assert _is_admin({"enterprise_role": None}, ["admin"]) is False
+
+
+# --- change-line rendering (exact-format guards) -----------------------------
+def test_tag():
+    assert _tag(Change("u", "org_add", "org_membership", None, None, "r")) == "APPROVAL"
+    assert _tag(Change("u", "limit_decrease", "limit", 2, 1, "r")) == "auto"
+
+
+def test_where_uses_org_name_then_id_then_blank():
+    c = Change("u", "org_remove", "org_membership", "r", None, "r", org_id="o1")
+    assert _where({"o1": "IDE"}, c) == "  [IDE]"
+    assert _where({}, c) == "  [o1]"                 # unknown org -> id
+    assert _where({}, Change("u", "limit_decrease", "limit", 2, 1, "r")) == ""
+
+
+def test_render_change_with_field_and_where_matches_onboard_format():
+    c = Change("u1", "org_add", "org_membership", None, "role-org", "onboard:IDE",
+               org_id="o1")
+    where = "  [IDE Standard]"
+    expected = (f"  [{'APPROVAL':8}] {c.kind:14} {c.field:16} {c.subject:34} "
+                f"{c.before} -> {c.after}{where}")
+    assert _render_change(c, label=c.subject, where=where) == expected
+
+
+def test_render_change_with_field_email_label_matches_move_format():
+    c = Change("u1", "limit_decrease", "limit", 100, 50, "policy:CLI")
+    expected = (f"  [{'auto':8}] {c.kind:14} {c.field:16} {'a@x.com':34} "
+                f"{c.before} -> {c.after}")
+    assert _render_change(c, label="a@x.com") == expected
+
+
+def test_render_change_no_field_format():
+    c = Change("u1", "limit_increase", "limit", 50, 100, "policy:IDE")
+    expected = f"  [{'APPROVAL':8}] {c.kind:14} {'a@x.com':34} {c.before} -> {c.after}"
+    assert _render_change(c, label="a@x.com", show_field=False) == expected
+
+
+def test_render_change_no_field_with_suffix_matches_reconcile_format():
+    c = Change("u1", "role_change", "enterprise_role", "r1", "r2", "policy:IDE")
+    suffix = f"  ({c.reason})"
+    expected = (f"  [{'APPROVAL':8}] {c.kind:14} {'a@x.com':34} "
+                f"{c.before} -> {c.after}  ({c.reason})")
+    assert _render_change(c, label="a@x.com", show_field=False, suffix=suffix) == expected

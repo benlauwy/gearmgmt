@@ -1,7 +1,7 @@
 """Workflow orchestration.
 
 Action commands build a Plan (diff-first) applied through the apply gate:
-  onboard · move · reassign · update_limits · offboard · reconcile
+  onboard · move · reassign · offboard · reconcile
 Read-only reports (mutate nothing; usage/coverage/logins also write no plan):
   reconcile · usage · coverage · logins
 """
@@ -11,14 +11,15 @@ import csv
 import json
 import os
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .config import Config
 from .plan import Change, Plan, _limit_kind, diff, save_plan
-from .policy import load_policy, resolve_desired
+from .policy import Policy, load_policy, resolve_desired
 from . import roster as roster_mod
 from .state import (diff_membership, load_snapshot, read_actual, read_members,
-                    read_utilizations, save_snapshot, snapshot_path)
+                    read_org_index, read_utilizations, resolve_identities,
+                    resolve_one, save_snapshot, snapshot_path)
 from .tui import MenuUnavailable, select_from_list
 
 
@@ -33,6 +34,43 @@ def _fmt_limit(value, is_set: bool = True) -> str:
     return str(value)
 
 
+def _emailer(actual: dict):
+    """Return a uid -> display-email lookup (falling back to the uid itself)."""
+    return lambda uid: actual.get(uid, {}).get("email") or uid
+
+
+def _by_email(actual: dict) -> dict:
+    """Index members by lower-cased email -> (user_id, actual_entry).
+
+    Members with no email on file are skipped (a roster email can't match them).
+    """
+    return {(a.get("email") or "").lower(): (uid, a)
+            for uid, a in actual.items() if a.get("email")}
+
+
+def _tag(c: Change) -> str:
+    """The approval-gate label shown at the start of a change line."""
+    return "APPROVAL" if c.needs_approval else "auto"
+
+
+def _where(org_index: dict, c: Change) -> str:
+    """A ``  [Org Name]`` suffix for org-scoped changes (empty when no org)."""
+    return f"  [{org_index.get(c.org_id, c.org_id)}]" if c.org_id else ""
+
+
+def _render_change(c: Change, *, label: str, show_field: bool = True,
+                   where: str = "", suffix: str = "") -> str:
+    """One formatted change line for a plan listing.
+
+    Unifies the columns shared by the action commands: the approval tag, the
+    change kind, an optional field column, a left-justified ``label`` (the
+    subject — user_id/email), the ``before -> after``, and optional ``where``
+    (org) / ``suffix`` (e.g. the drift reason)."""
+    field = f"{c.field:16} " if show_field else ""
+    return (f"  [{_tag(c):8}] {c.kind:14} {field}{label:34} "
+            f"{c.before} -> {c.after}{where}{suffix}")
+
+
 def _org_id_by_name(org_index: dict, name: str) -> str:
     """Resolve an org name to its id (case-insensitive) or exit with a message."""
     matches = [oid for oid, n in org_index.items() if n.lower() == name.lower()]
@@ -43,31 +81,13 @@ def _org_id_by_name(org_index: dict, name: str) -> str:
     raise SystemExit(f"ERROR: multiple orgs named {name!r}")
 
 
-def _resolve_user_id(actual: dict, value: str) -> str:
-    """Resolve a --user value (a user_id or an email) to a canonical user_id.
-
-    Accepts the API user_id directly, or a case-insensitive email match. Exits
-    with a clear message if the value matches no one (or, defensively, >1 user).
-    """
-    if value in actual:
-        return value
-    matches = [uid for uid, a in actual.items()
-               if (a.get("email") or "").lower() == value.lower()]
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        raise SystemExit(f"ERROR: no user matching {value!r} "
-                         f"(give an email or the user_id)")
-    raise SystemExit(f"ERROR: email {value!r} matches multiple users: {matches}")
-
-
 def _resolve_population(cfg: Config, client):
     """Read actual state + org index and resolve desired state for every user.
 
     Returns (actual, desired_map, org_index, policy).
     """
     pol = load_policy(cfg)
-    org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
+    org_index = read_org_index(client)
     admin_subs = [s.lower() for s in cfg.governance.get("admin_role_name_contains", [])]
     actual = read_actual(client)
     desired = {}
@@ -106,6 +126,15 @@ def _resolve_org_role_id(cfg: Config, client) -> str:
         "ERROR: onboarding needs an org-level role for new members. Set "
         "[invite].org_role_id or [invite].org_role_name in config.toml. "
         f"Available org roles: {available}")
+
+
+def _fill_org_add_roles(cfg: Config, client, changes: list[Change]) -> None:
+    """Fill in the org-level role for every org-add (resolved once, lazily)."""
+    org_adds = [c for c in changes if c.kind == "org_add"]
+    if org_adds:
+        org_role_id = _resolve_org_role_id(cfg, client)
+        for c in org_adds:
+            c.after = org_role_id
 
 
 def _fail_roster(errors: list[str]):
@@ -216,21 +245,25 @@ def _reassign_row_changes(email: str, canonical: str, org_id: str, pol, existing
     return changes
 
 
-def onboard(cfg: Config, client, *, file: Optional[str] = None):
-    """Invite users from a roster file and materialize their org membership,
-    enterprise role, and ACU limit from policy.
+class _RosterCtx(NamedTuple):
+    """The shared context onboard/reassign build before computing their plans."""
+    pol: Policy
+    org_index: dict
+    org_by_lower: dict
+    governed: set
+    policy_name_by_lower: dict
+    roster: "roster_mod.Roster"
 
-    The roster is a CSV or .xlsx with a header row and one or two columns: an
-    email column (required) and a group/organization-name column (optional). With
-    one column you pick the target org interactively; with two we auto-detect
-    which is which. Emails and org names are validated up front — any problem
-    fails before anything is invited. Diff-first: writes a plan; apply it with
-    ``govern.py apply <plan> [--approved]`` (invites are gated)."""
-    if not file:
-        raise SystemExit("ERROR: onboard requires --file PATH (a CSV or .xlsx roster)")
 
+def _load_and_validate_roster(cfg: Config, client, file: str) -> _RosterCtx:
+    """Load policy + org inventory, parse the roster, and validate it up front.
+
+    Shared by onboard and reassign: builds the governed-org lookups, parses the
+    file (failing cleanly on a structural RosterError), prints any parse
+    warnings, then runs the email(+org) value validation — exiting via
+    _fail_roster on any problem BEFORE any prompt or API mutation."""
     pol = load_policy(cfg)
-    org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
+    org_index = read_org_index(client)
     org_by_lower = {name.lower(): oid for oid, name in org_index.items()}
     governed = set(pol.roles) | set(pol.limits)
     policy_name_by_lower = {n.lower(): n for n in governed}
@@ -247,34 +280,68 @@ def onboard(cfg: Config, client, *, file: Optional[str] = None):
     for w in roster.warnings:
         print(f"WARNING: {w}")
 
-    # --- validate emails (+ org names, when present) up front, BEFORE any prompt
-    #     or API mutation. Every problem is reported at once. ---
+    # --- validate emails (+ org names, when present) up front ---
     errors = _validate_roster_values(roster, is_valid_org=is_valid_org,
                                      org_by_lower=org_by_lower)
     if errors:
         _fail_roster(errors)
+    return _RosterCtx(pol, org_index, org_by_lower, governed,
+                      policy_name_by_lower, roster)
+
+
+def _resolve_single_column_org(roster, pol, org_by_lower, *, no_orgs_msg: str,
+                               prompt: str, selected_label: str) -> None:
+    """For a single-column roster, pick ONE org interactively for everyone.
+
+    No-op when the roster already has an org column. Only orgs that can accept
+    the operation (an enterprise role in roles.toml AND existing in the
+    enterprise) are offered; the chosen org is written to every row. Exits
+    cleanly when there's nothing to choose or no interactive terminal."""
+    if roster.has_org_column:
+        return
+    selectable = sorted(n for n in pol.roles if n.lower() in org_by_lower)
+    if not selectable:
+        raise SystemExit(no_orgs_msg)
+    try:
+        chosen = select_from_list(prompt, selectable)
+    except MenuUnavailable as e:
+        raise SystemExit(f"ERROR: {e}. Provide a 2-column file (email, group name) instead.")
+    if not chosen:
+        raise SystemExit("Cancelled — no organization selected.")
+    print(f"{selected_label}: {chosen}\n")
+    roster.orgs = [chosen] * len(roster.emails)
+
+
+def onboard(cfg: Config, client, *, file: Optional[str] = None):
+    """Invite users from a roster file and materialize their org membership,
+    enterprise role, and ACU limit from policy.
+
+    The roster is a CSV or .xlsx with a header row and one or two columns: an
+    email column (required) and a group/organization-name column (optional). With
+    one column you pick the target org interactively; with two we auto-detect
+    which is which. Emails and org names are validated up front — any problem
+    fails before anything is invited. Diff-first: writes a plan; apply it with
+    ``govern.py apply <plan> [--approved]`` (invites are gated)."""
+    if not file:
+        raise SystemExit("ERROR: onboard requires --file PATH (a CSV or .xlsx roster)")
+
+    ctx = _load_and_validate_roster(cfg, client, file)
+    pol, org_index, org_by_lower = ctx.pol, ctx.org_index, ctx.org_by_lower
+    governed, policy_name_by_lower, roster = (
+        ctx.governed, ctx.policy_name_by_lower, ctx.roster)
 
     # --- single-column file: choose ONE org interactively for everyone (only
     #     orgs that can accept invites — i.e. have an enterprise role — are shown) ---
-    if not roster.has_org_column:
-        selectable = sorted(n for n in pol.roles if n.lower() in org_by_lower)
-        if not selectable:
-            raise SystemExit("ERROR: no organizations available to invite into "
-                             "(roles.toml has no org that exists in the enterprise).")
-        try:
-            chosen = select_from_list(
-                "Select the organization to add these users to:", selectable)
-        except MenuUnavailable as e:
-            raise SystemExit(f"ERROR: {e}. Provide a 2-column file (email, group name) instead.")
-        if not chosen:
-            raise SystemExit("Cancelled — no organization selected.")
-        print(f"Selected organization: {chosen}\n")
-        roster.orgs = [chosen] * len(roster.emails)
+    _resolve_single_column_org(
+        roster, pol, org_by_lower,
+        no_orgs_msg="ERROR: no organizations available to invite into "
+                    "(roles.toml has no org that exists in the enterprise).",
+        prompt="Select the organization to add these users to:",
+        selected_label="Selected organization")
 
     # --- read existing members (to split new vs existing) ---
     actual = read_actual(client)
-    actual_by_email = {(a.get("email") or "").lower(): (uid, a)
-                       for uid, a in actual.items() if a.get("email")}
+    actual_by_email = _by_email(actual)
 
     # --- new users must be invitable: their target org needs an enterprise role ---
     role_errors: list[str] = []
@@ -309,12 +376,7 @@ def onboard(cfg: Config, client, *, file: Optional[str] = None):
         changes.extend(_onboard_row_changes(email, canonical, org_id, pol, existing,
                                             f"onboard:{canonical}"))
 
-    # Fill in the org-level role for every org-add (resolved once, lazily).
-    org_adds = [c for c in changes if c.kind == "org_add"]
-    if org_adds:
-        org_role_id = _resolve_org_role_id(cfg, client)
-        for c in org_adds:
-            c.after = org_role_id
+    _fill_org_add_roles(cfg, client, changes)
 
     scope = os.path.basename(file)
     plan = Plan(workflow="onboard", triggered_by=f"onboard:file:{scope}", changes=changes)
@@ -333,10 +395,7 @@ def onboard(cfg: Config, client, *, file: Optional[str] = None):
     if warnings:
         print()
     for c in changes:
-        tag = "APPROVAL" if c.needs_approval else "auto"
-        where = f"  [{org_index.get(c.org_id, c.org_id)}]" if c.org_id else ""
-        print(f"  [{tag:8}] {c.kind:14} {c.field:16} {c.subject:34} "
-              f"{c.before} -> {c.after}{where}")
+        print(_render_change(c, label=c.subject, where=_where(org_index, c)))
     if not changes:
         print("  (no changes — everyone in the roster already matches policy)")
     print(f"\nPlan saved: {path}")
@@ -358,8 +417,7 @@ def move_members(cfg: Config, client):
     curr = {uid: a["org_ids"] for uid, a in actual.items()}
     prev = load_snapshot(cfg)
 
-    def email(uid):
-        return actual.get(uid, {}).get("email") or uid
+    email = _emailer(actual)
 
     def names(ids):
         return [org_index.get(o, f"<unknown:{o}>") for o in ids]
@@ -394,8 +452,7 @@ def move_members(cfg: Config, client):
     if changes:
         print("\nPlanned changes for movers:")
         for c in changes:
-            tag = "APPROVAL" if c.needs_approval else "auto"
-            print(f"  [{tag:8}] {c.kind:14} {c.field:16} {email(c.user_id):34} {c.before} -> {c.after}")
+            print(_render_change(c, label=email(c.user_id)))
 
     violations = [uid for uid in mover_ids
                   if desired.get(uid) and desired[uid].source == "violation"]
@@ -431,36 +488,16 @@ def reassign(cfg: Config, client, *, file: Optional[str] = None):
     if not file:
         raise SystemExit("ERROR: reassign requires --file PATH (a CSV or .xlsx roster)")
 
-    pol = load_policy(cfg)
-    org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
-    org_by_lower = {name.lower(): oid for oid, name in org_index.items()}
-    governed = set(pol.roles) | set(pol.limits)
-    policy_name_by_lower = {n.lower(): n for n in governed}
-
-    def is_valid_org(name: str) -> bool:
-        low = (name or "").strip().lower()
-        return low in policy_name_by_lower and low in org_by_lower
-
-    # --- parse + structurally validate the file (shape, header, columns) ---
-    try:
-        roster = roster_mod.parse_roster(file, is_valid_org=is_valid_org)
-    except roster_mod.RosterError as e:
-        raise SystemExit(f"ERROR: {e}")
-    for w in roster.warnings:
-        print(f"WARNING: {w}")
-
-    # --- validate emails (+ destination org names, when present) up front ---
-    errors = _validate_roster_values(roster, is_valid_org=is_valid_org,
-                                     org_by_lower=org_by_lower)
-    if errors:
-        _fail_roster(errors)
+    ctx = _load_and_validate_roster(cfg, client, file)
+    pol, org_index, org_by_lower = ctx.pol, ctx.org_index, ctx.org_by_lower
+    governed, policy_name_by_lower, roster = (
+        ctx.governed, ctx.policy_name_by_lower, ctx.roster)
 
     # --- read existing members. reassign MOVES existing users; it never invites,
     #     so every roster email must already exist. Check before any prompt so an
     #     unknown email fails up front rather than after picking a destination. ---
     actual = read_actual(client)
-    actual_by_email = {(a.get("email") or "").lower(): (uid, a)
-                       for uid, a in actual.items() if a.get("email")}
+    actual_by_email = _by_email(actual)
     unknown = [f"row {i}: {email} is not an enterprise user "
                "(reassign moves existing users; use onboard to invite new ones)"
                for i, (email, _org) in enumerate(roster.rows(), start=1)
@@ -470,20 +507,12 @@ def reassign(cfg: Config, client, *, file: Optional[str] = None):
 
     # --- single-column file: choose ONE destination org for everyone (only orgs
     #     with an enterprise role that exist in the enterprise are shown) ---
-    if not roster.has_org_column:
-        selectable = sorted(n for n in pol.roles if n.lower() in org_by_lower)
-        if not selectable:
-            raise SystemExit("ERROR: no organizations available to move into "
-                             "(roles.toml has no org that exists in the enterprise).")
-        try:
-            chosen = select_from_list(
-                "Select the destination organization to move these users to:", selectable)
-        except MenuUnavailable as e:
-            raise SystemExit(f"ERROR: {e}. Provide a 2-column file (email, group name) instead.")
-        if not chosen:
-            raise SystemExit("Cancelled — no organization selected.")
-        print(f"Selected destination organization: {chosen}\n")
-        roster.orgs = [chosen] * len(roster.emails)
+    _resolve_single_column_org(
+        roster, pol, org_by_lower,
+        no_orgs_msg="ERROR: no organizations available to move into "
+                    "(roles.toml has no org that exists in the enterprise).",
+        prompt="Select the destination organization to move these users to:",
+        selected_label="Selected destination organization")
 
     # --- build the plan ---
     changes: list[Change] = []
@@ -503,12 +532,7 @@ def reassign(cfg: Config, client, *, file: Optional[str] = None):
             warnings.append(f"{email}: already in {canonical!r} at its role/limit — nothing to move")
         changes.extend(row_changes)
 
-    # Fill in the org-level role for every org-add (resolved once, lazily).
-    org_adds = [c for c in changes if c.kind == "org_add"]
-    if org_adds:
-        org_role_id = _resolve_org_role_id(cfg, client)
-        for c in org_adds:
-            c.after = org_role_id
+    _fill_org_add_roles(cfg, client, changes)
 
     scope = os.path.basename(file)
     plan = Plan(workflow="reassign", triggered_by=f"reassign:file:{scope}", changes=changes)
@@ -527,53 +551,11 @@ def reassign(cfg: Config, client, *, file: Optional[str] = None):
     if warnings:
         print()
     for c in changes:
-        tag = "APPROVAL" if c.needs_approval else "auto"
-        where = f"  [{org_index.get(c.org_id, c.org_id)}]" if c.org_id else ""
-        print(f"  [{tag:8}] {c.kind:14} {c.field:16} {c.subject:34} "
-              f"{c.before} -> {c.after}{where}")
+        print(_render_change(c, label=c.subject, where=_where(org_index, c)))
     if not changes:
         print("  (no changes — everyone in the roster is already in their destination org)")
     print(f"\nPlan saved: {path}")
     print(f"Apply with:  python govern.py apply {path} --approved   # org adds/increases are gated")
-    return plan
-
-
-def update_limits(cfg: Config, client, *, org: Optional[str] = None,
-                  user_id: Optional[str] = None):
-    """Re-materialize limits after a limits.toml change; the --user
-    variant is the single-user upgrade fed by `usage`. Limit-only and diff-first:
-    computes each target's desired limit (honoring overrides / admin-exemption /
-    single-org rules) and writes a plan. Apply with ``govern.py apply <plan>``."""
-    if not org and not user_id:
-        raise SystemExit("ERROR: update-limits requires --org NAME or --user USER_ID")
-
-    actual, desired, org_index, _pol = _resolve_population(cfg, client)
-    if user_id:
-        user_id = _resolve_user_id(actual, user_id)
-        targets, scope = {user_id}, f"user:{user_id}"
-    else:
-        oid = _org_id_by_name(org_index, org)
-        targets = {uid for uid, a in actual.items() if oid in a["org_ids"]}
-        scope = f"org:{org}"
-
-    subset = {uid: d for uid, d in desired.items() if uid in targets}
-    changes = [c for c in diff(actual, subset) if c.field == "limit"]
-    plan = Plan(workflow="update-limits", triggered_by=f"update-limits:{scope}", changes=changes)
-    path = save_plan(cfg, plan)
-
-    def email(uid):
-        return actual.get(uid, {}).get("email") or uid
-
-    print(f"=== update-limits ({scope}) ===")
-    print(f"Target members: {len(targets)}  |  limit changes: {len(changes)}\n")
-    for c in changes:
-        tag = "APPROVAL" if c.needs_approval else "auto"
-        print(f"  [{tag:8}] {c.kind:14} {email(c.user_id):34} {c.before} -> {c.after}")
-    if not changes:
-        print("  (no drift — every target is already at its desired limit)")
-    print(f"\nPlan saved: {path}")
-    print(f"Apply with:  python govern.py apply {path}")
-    print(f"             python govern.py apply {path} --approved   # include increases")
     return plan
 
 
@@ -602,8 +584,7 @@ def _offboard_targets_from_file(file: str, actual: dict) -> tuple[list[str], str
     if errors:
         _fail_roster(errors)
 
-    actual_by_email = {(a.get("email") or "").lower(): uid
-                       for uid, a in actual.items() if a.get("email")}
+    actual_by_email = _by_email(actual)
     unknown = [f"row {i}: {email} is not an enterprise user "
                "(nothing to offboard — it may already have been removed)"
                for i, (email, _org) in enumerate(roster.rows(), start=1)
@@ -611,7 +592,7 @@ def _offboard_targets_from_file(file: str, actual: dict) -> tuple[list[str], str
     if unknown:
         _fail_roster(unknown)
 
-    targets = [actual_by_email[email.strip().lower()] for email, _org in roster.rows()]
+    targets = [actual_by_email[email.strip().lower()][0] for email, _org in roster.rows()]
     return targets, f"file:{os.path.basename(file)}"
 
 
@@ -627,14 +608,14 @@ def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
                          "--org-dissolved NAME, or --file PATH")
 
     actual = read_actual(client)
-    org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
+    org_index = read_org_index(client)
     leaver_role = cfg.leaver.get("enterprise_role_id")
     raw_limit = cfg.leaver.get("limit", 0)
     leaver_limit = (None if isinstance(raw_limit, str) and raw_limit.lower() in ("null", "none")
                     else int(raw_limit))
 
     if user_id:
-        user_id = _resolve_user_id(actual, user_id)
+        user_id = resolve_one(actual, user_id)
         targets, scope = [user_id], f"user:{user_id}"
     elif org_dissolved:
         oid = _org_id_by_name(org_index, org_dissolved)
@@ -662,8 +643,7 @@ def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
     plan = Plan(workflow="offboard", triggered_by=f"offboard:{scope}", changes=changes)
     path = save_plan(cfg, plan)
 
-    def email(uid):
-        return actual.get(uid, {}).get("email") or uid
+    email = _emailer(actual)
 
     print(f"=== offboard ({scope}) ===")
     print(f"Target users: {len(targets)}  |  changes: {len(changes)} "
@@ -672,8 +652,8 @@ def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
         ucs = [c for c in changes if c.user_id == uid]
         print(f"  {email(uid)}: {len(ucs)} change(s)")
         for c in ucs:
-            where = f"  [{org_index.get(c.org_id, c.org_id)}]" if c.org_id else ""
-            print(f"     {c.kind:14} {c.field:16} {c.before} -> {c.after}{where}")
+            print(f"     {c.kind:14} {c.field:16} {c.before} -> {c.after}"
+                  f"{_where(org_index, c)}")
     if not changes:
         print("  (nothing to do — already offboarded)")
     print(f"\nPlan saved: {path}")
@@ -681,31 +661,63 @@ def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
     return plan
 
 
-def reconcile(cfg: Config, client, *, auto_correct: bool = False):
-    """Report drift of actual vs desired (limits + roles) across the population;
-    honors overrides and flags non-admins in >1 org. Read-only — it
-    computes and saves a plan but does not apply it."""
+def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
+              org: Optional[str] = None, limits_only: bool = False):
+    """Report drift of actual vs desired (limits + roles) and save a plan.
+
+    Read-only — it computes and saves a plan but does not apply it. By default it
+    covers EVERYONE and both dimensions (limits + enterprise roles); narrow it
+    with:
+
+      - ``user_id`` (--user, an email or user_id) — just that one member;
+      - ``org`` (--org NAME) — just that org's members;
+      - ``limits_only`` (--limits-only) — only ACU-limit drift, leaving roles
+        alone (the single-user form is the usage-driven upgrade).
+
+    Honors overrides, admin-exemption, and the single-governed-org rule, and
+    flags non-admins in >1 org. ``--user`` and ``--org`` are mutually exclusive."""
+    if user_id and org:
+        raise SystemExit("ERROR: reconcile takes at most one of --user / --org")
+
     actual, desired, org_index, pol = _resolve_population(cfg, client)
+
+    if user_id:
+        uid = resolve_one(actual, user_id)
+        scope_uids, scope = {uid}, f"user:{uid}"
+    elif org:
+        oid = _org_id_by_name(org_index, org)
+        scope_uids = {u for u, a in actual.items() if oid in a["org_ids"]}
+        scope = f"org:{org}"
+    else:
+        scope_uids, scope = set(actual), "all"
+
+    desired = {u: d for u, d in desired.items() if u in scope_uids}
     changes = diff(actual, desired)
-    plan = Plan(workflow="reconcile", triggered_by="reconcile", changes=changes)
+    if limits_only:
+        changes = [c for c in changes if c.field == "limit"]
+
+    triggered = "reconcile" if scope == "all" else f"reconcile:{scope}"
+    plan = Plan(workflow="reconcile", triggered_by=triggered, changes=changes)
     path = save_plan(cfg, plan)
 
-    def email(uid):
-        return actual.get(uid, {}).get("email") or uid
+    email = _emailer(actual)
 
     need = [c for c in changes if c.needs_approval]
     auto = [c for c in changes if not c.needs_approval]
     governed_names = sorted(set(pol.roles) | set(pol.limits))
 
     print("=== reconcile (read-only) ===")
-    print(f"Population: {len(actual)} user(s)  |  Governed orgs: {', '.join(governed_names)}")
+    if scope != "all" or limits_only:
+        bits = ([scope] if scope != "all" else []) + (["limits only"] if limits_only else [])
+        print(f"Scope: {' | '.join(bits)}")
+    print(f"Population: {len(scope_uids)} user(s)  |  Governed orgs: {', '.join(governed_names)}")
     print(f"Drift: {len(changes)} change(s) — {len(need)} need approval, {len(auto)} auto-apply\n")
 
     if changes:
         print("Drift detail:")
         for c in changes:
-            tag = "APPROVAL" if c.needs_approval else "auto"
-            print(f"  [{tag:8}] {c.kind:14} {email(c.user_id):34} {c.before} -> {c.after}  ({c.reason})")
+            print(_render_change(c, label=email(c.user_id), show_field=False,
+                                 suffix=f"  ({c.reason})"))
         print()
 
     exempt = [uid for uid, d in desired.items() if d.source == "admin-exempt"]
@@ -713,6 +725,8 @@ def reconcile(cfg: Config, client, *, auto_correct: bool = False):
     no_org = [uid for uid, d in desired.items() if d.source == "no-governed-org"]
     orphans = {}
     for uid, a in actual.items():
+        if uid not in scope_uids:
+            continue
         unknown = [oid for oid in a["org_ids"] if oid not in org_index]
         if unknown:
             orphans[uid] = unknown
@@ -831,8 +845,8 @@ def _write_table(path: str, header: list, rows: list) -> None:
 def usage(cfg: Config, client, *, reverse: bool = False,
           user_id: Optional[str] = None, export: Optional[str] = None):
     """Flag users near/at their cap with a usage trend. Detection only:
-    it emits candidates for the single-user `update-limits` upgrade and never
-    mutates.
+    it emits candidates for the single-user `reconcile --limits-only` upgrade and
+    never mutates.
 
     Rows are printed sorted by percent-of-cap, highest first; ``reverse`` (the
     --reverse flag) flips that to lowest first.
@@ -869,7 +883,7 @@ def usage(cfg: Config, client, *, reverse: bool = False,
     single = user_id is not None
     if single:
         members = read_members(client)
-        user_id = _resolve_user_id(members, user_id)
+        user_id = resolve_one(members, user_id)
         raw = client.get_user_limit(user_id) or {}
         local_agent = raw.get("local_agent") or {}
         actual = {user_id: {"email": members[user_id].get("email"),
@@ -935,7 +949,7 @@ def usage(cfg: Config, client, *, reverse: bool = False,
     # it just prints the row above (+ an upgrade hint when flagged) and returns.
     if single:
         for c in candidates:
-            print(f"\n  upgrade: python govern.py update-limits --user {c['user_id']}"
+            print(f"\n  upgrade: python govern.py reconcile --user {c['user_id']} --limits-only"
                   f"   # {c['email']} at {c['pct']:.0%}")
         return candidates
 
@@ -946,7 +960,7 @@ def usage(cfg: Config, client, *, reverse: bool = False,
 
     print(f"\n{len(candidates)} upgrade candidate(s). Written: {out}")
     for c in candidates:
-        print(f"  upgrade: python govern.py update-limits --user {c['user_id']}"
+        print(f"  upgrade: python govern.py reconcile --user {c['user_id']} --limits-only"
               f"   # {c['email']} at {c['pct']:.0%}")
     return candidates
 
@@ -1068,7 +1082,7 @@ def logins(cfg: Config, client, dump_never: Optional[str] = None):
     an explicit, non-governed report artifact, so it's written even on a
     --dry-run (mirroring how ``usage`` always emits its candidates file)."""
     members = read_members(client)
-    org_index = {o["org_id"]: o["name"] for o in client.list_organizations()}
+    org_index = read_org_index(client)
 
     # Set of CURRENT members who have logged in at least once. Match each login
     # event on user_id first, then fall back to email (case-insensitive) for
@@ -1145,7 +1159,7 @@ def lookup(cfg: Config, client, *, user_id: Optional[str] = None):
     pending ``email|<hash>`` invite alongside the ``okta|<Org>|<id>`` (or
     ``user-<uuid>``) identity minted once they authenticate via SSO — so a single
     email can map to several user_ids. Unlike the strict resolver the action
-    commands use (``_resolve_user_id``, which fails on ambiguity so they never
+    commands use (``resolve_one``, which fails on ambiguity so they never
     touch the wrong identity), lookup prints EVERY matching user_id, one per
     line, so the SSO identity (e.g. ``okta|Cognition|00u...``) is always
     surfaced. A value that is itself a known user_id is echoed back; an unknown
@@ -1166,14 +1180,7 @@ def lookup(cfg: Config, client, *, user_id: Optional[str] = None):
     if not user_id:
         raise SystemExit("ERROR: lookup requires --user EMAIL_OR_USER_ID")
     members = read_members(client)
-    if user_id in members:          # an exact user_id — echo it back
-        matches = [user_id]
-    else:                           # else every member whose email matches
-        matches = sorted(uid for uid, m in members.items()
-                         if (m.get("email") or "").lower() == user_id.lower())
-    if not matches:
-        raise SystemExit(f"ERROR: no user matching {user_id!r} "
-                         f"(give an email or the user_id)")
+    matches = resolve_identities(members, user_id)  # every matching identity
     rows = []
     for uid in matches:             # one get_user_limit per match (usually 1–2)
         raw = client.get_user_limit(uid) or {}

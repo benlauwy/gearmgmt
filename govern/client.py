@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Optional
+from typing import Optional
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
+
+from .config import Config
 
 
 class DevinClient:
@@ -32,6 +34,23 @@ class DevinClient:
         # Like reads, the mutations are network-latency bound and independent
         # across users; 429s are retried with backoff in _request.
         self.apply_concurrency = apply_concurrency
+
+    @classmethod
+    def from_config(cls, cfg: Config, *, dry_run: bool = False) -> "DevinClient":
+        """Build a client from a Config's [api] settings (retry + concurrency).
+
+        The single place the resilience/concurrency knobs are read, shared by the
+        govern.py CLI and report.py. ``dry_run`` is plumbed through for the
+        plan/apply engine; read-only callers (report.py) leave it False."""
+        api = cfg.api
+        return cls(
+            cfg.token, cfg.base_url, dry_run=dry_run,
+            max_retries=int(api.get("max_retries", 5)),
+            backoff=float(api.get("retry_backoff_seconds", 2.0)),
+            sleep=float(api.get("rate_limit_sleep_seconds", 0.1)),
+            read_concurrency=int(api.get("read_concurrency", 8)),
+            apply_concurrency=int(api.get("apply_concurrency", 8)),
+        )
 
     # ---- low-level ----
     def _request(self, method: str, path: str, *, body=None, params=None):

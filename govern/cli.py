@@ -19,17 +19,6 @@ _ENGINE = (
 )
 
 
-def _client(cfg, dry_run: bool) -> DevinClient:
-    return DevinClient(
-        cfg.token, cfg.base_url, dry_run=dry_run,
-        max_retries=int(cfg.api.get("max_retries", 5)),
-        backoff=float(cfg.api.get("retry_backoff_seconds", 2.0)),
-        sleep=float(cfg.api.get("rate_limit_sleep_seconds", 0.1)),
-        read_concurrency=int(cfg.api.get("read_concurrency", 8)),
-        apply_concurrency=int(cfg.api.get("apply_concurrency", 8)),
-    )
-
-
 def main(argv: Optional[list[str]] = None) -> int:
     # Shared flags accepted either before OR after the command. default=SUPPRESS
     # so an unset flag in one position never clobbers a value set in the other.
@@ -62,11 +51,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="path to a CSV or .xlsx roster: an email column and an "
                          "optional destination group/org-name column (with a header row)")
 
-    sp = add("update-limits", "re-materialize limits after editing limits.toml / overrides.toml")
-    g = sp.add_mutually_exclusive_group(required=True)
-    g.add_argument("--org", help="org name whose members to re-materialize")
-    g.add_argument("--user", help="a single email or user_id")
-
     sp = add("offboard", "remove user(s) from all orgs + zero limit + leaver role")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--user", help="email or user_id to offboard")
@@ -76,7 +60,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                                   "offboard in bulk (an email column with a header "
                                   "row; any group/org column is ignored)")
 
-    add("reconcile", "report drift of actual vs desired (+ save a plan)")
+    sp = add("reconcile", "report drift of actual vs desired (+ save a plan); "
+                          "optionally scoped to a --user/--org and/or --limits-only")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--user", help="restrict to a single member (an email or "
+                                  "user_id); the --limits-only form is the "
+                                  "usage-driven single-user upgrade")
+    g.add_argument("--org", help="restrict to one org's members (by org name)")
+    sp.add_argument("--limits-only", action="store_true", dest="limits_only",
+                    help="reconcile only ACU limits, leaving enterprise roles alone")
     sp = add("usage", "flag users near/at their cap (detection only)")
     sp.add_argument("--reverse", action="store_true",
                     help="reverse the sort order (lowest usage first instead of "
@@ -123,7 +115,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config(getattr(args, "config", None))
     if not cfg.token:
         p.error("DEVIN_SERVICE_USER_TOKEN not set (see .env / .env.example)")
-    client = _client(cfg, getattr(args, "dry_run", False))
+    client = DevinClient.from_config(cfg, dry_run=getattr(args, "dry_run", False))
 
     cmd = args.cmd
     if cmd == "onboard":
@@ -132,15 +124,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         workflows.move_members(cfg, client)
     elif cmd == "reassign":
         workflows.reassign(cfg, client, file=getattr(args, "file", None))
-    elif cmd == "update-limits":
-        workflows.update_limits(cfg, client, org=getattr(args, "org", None),
-                                user_id=getattr(args, "user", None))
     elif cmd == "offboard":
         workflows.offboard(cfg, client, user_id=getattr(args, "user", None),
                            org_dissolved=getattr(args, "org_dissolved", None),
                            file=getattr(args, "file", None))
     elif cmd == "reconcile":
-        workflows.reconcile(cfg, client)
+        workflows.reconcile(cfg, client, user_id=getattr(args, "user", None),
+                            org=getattr(args, "org", None),
+                            limits_only=getattr(args, "limits_only", False))
     elif cmd == "usage":
         workflows.usage(cfg, client, reverse=getattr(args, "reverse", False),
                         user_id=getattr(args, "user", None),

@@ -28,7 +28,7 @@ enterprise_role_id = "role-REPLACE_WITH_LEAVER_ROLE_ID"  # e.g. "Member"
 limit = 0
 
 [utilization]
-# Near-cap detection (detection only; emits candidates for the update-limits upgrade).
+# Near-cap detection (detection only; emits candidates for the `reconcile --user X --limits-only` upgrade).
 near_cap_pct      = 0.8   # flag users at >= 80% of their cap
 trend_window_days = 14    # look-back window for the recent-vs-prior usage trend
 cycle_days        = 30    # window summed as "this cycle" usage vs the per-user cap
