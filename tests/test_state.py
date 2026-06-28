@@ -1,12 +1,19 @@
-"""Actual-state reads, role-assignment splitting, membership snapshot diffing."""
+"""Actual-state reads, role-assignment splitting, identity resolution."""
 from __future__ import annotations
 
 import pytest
-
-from govern.state import (_split_role_assignments, diff_membership,
-                          load_snapshot, read_actual, read_members,
-                          resolve_identities, resolve_one, save_snapshot)
 from conftest import FakeClient
+
+from govern.errors import GovernError
+from govern.state import (
+    ActualState,
+    _split_role_assignments,
+    parse_limit_payload,
+    read_actual,
+    read_members,
+    resolve_identities,
+    resolve_one,
+)
 
 
 def _member(uid, email, assignments, name=None):
@@ -53,10 +60,21 @@ def test_read_members_returns_identity_and_sorted_org_ids():
         _member("u2", "b@x.com", [_ent("e1")]),
     ])
     members = read_members(client)
-    assert members["u1"]["email"] == "a@x.com"
-    assert members["u1"]["org_ids"] == ["o1", "o2"]   # sorted
-    assert members["u2"]["org_ids"] == []
+    assert members["u1"].email == "a@x.com"
+    assert members["u1"].org_ids == ["o1", "o2"]   # sorted
+    assert members["u2"].org_ids == []
     assert client.calls == []                          # no mutations / limit reads
+
+
+# --- parse_limit_payload ----------------------------------------------------
+@pytest.mark.parametrize("raw, expected", [
+    ({"local_agent": {"cycle_acu_limit": 100}}, (100, True)),   # numeric cap
+    ({"local_agent": {"cycle_acu_limit": None}}, (None, True)),  # explicit unlimited
+    ({}, (None, False)),                                         # no override
+    (None, (None, False)),                                       # missing payload
+])
+def test_parse_limit_payload(raw, expected):
+    assert parse_limit_payload(raw) == expected
 
 
 # --- read_actual (members + per-user limit) ---------------------------------
@@ -75,42 +93,18 @@ def test_read_actual_merges_limits_and_flags_set():
     )
     actual = read_actual(client, workers=1, progress=False)
 
-    assert actual["u1"]["limit"] == 100 and actual["u1"]["limit_set"] is True
-    assert actual["u1"]["org_ids"] == ["o1"]
-    assert actual["u1"]["enterprise_role"]["role_id"] == "e1"
+    assert actual["u1"].limit == 100 and actual["u1"].limit_set is True
+    assert actual["u1"].org_ids == ["o1"]
+    assert actual["u1"].enterprise_role["role_id"] == "e1"
 
-    assert actual["u2"]["limit"] is None and actual["u2"]["limit_set"] is True   # unlimited
-    assert actual["u3"]["limit"] is None and actual["u3"]["limit_set"] is False  # unset
-
-
-# --- diff_membership --------------------------------------------------------
-def test_diff_membership_classifies_joiner_mover_leaver():
-    prev = {"u1": ["o1"], "u2": ["o1", "o2"], "u3": ["o1"]}
-    curr = {"u1": ["o1"], "u2": ["o2"], "u4": ["o1"]}
-    delta = diff_membership(prev, curr)
-
-    assert delta["joiners"] == ["u4"]
-    assert delta["leavers"] == ["u3"]
-    assert delta["movers"] == [("u2", ["o1", "o2"], ["o2"])]
-
-
-def test_diff_membership_no_change_is_empty():
-    same = {"u1": ["o1", "o2"]}
-    delta = diff_membership(same, dict(same))
-    assert delta == {"joiners": [], "movers": [], "leavers": []}
-
-
-# --- snapshot round-trip ----------------------------------------------------
-def test_snapshot_save_then_load(cfg):
-    assert load_snapshot(cfg) == {}            # nothing written yet
-    snap = {"u1": ["o1"], "u2": ["o1", "o2"]}
-    save_snapshot(cfg, snap)
-    assert load_snapshot(cfg) == snap
+    assert actual["u2"].limit is None and actual["u2"].limit_set is True   # unlimited
+    assert actual["u3"].limit is None and actual["u3"].limit_set is False  # unset
 
 
 # --- identity resolvers -----------------------------------------------------
 def _index():
-    return {"user-1": {"email": "a@x.com"}, "user-2": {"email": "b@x.com"}}
+    return {"user-1": ActualState("user-1", email="a@x.com"),
+            "user-2": ActualState("user-2", email="b@x.com")}
 
 
 def test_resolve_one_passthrough_user_id():
@@ -122,19 +116,21 @@ def test_resolve_one_by_email_case_insensitive():
 
 
 def test_resolve_one_unknown_exits():
-    with pytest.raises(SystemExit):
+    with pytest.raises(GovernError):
         resolve_one(_index(), "missing@x.com")
 
 
 def test_resolve_one_ambiguous_email_exits():
-    dup = {"u1": {"email": "dup@x.com"}, "u2": {"email": "dup@x.com"}}
-    with pytest.raises(SystemExit):
+    dup = {"u1": ActualState("u1", email="dup@x.com"),
+           "u2": ActualState("u2", email="dup@x.com")}
+    with pytest.raises(GovernError):
         resolve_one(dup, "dup@x.com")
 
 
 def test_resolve_identities_returns_all_matches_sorted():
-    dup = {"u2": {"email": "dup@x.com"}, "u1": {"email": "dup@x.com"},
-           "u3": {"email": "other@x.com"}}
+    dup = {"u2": ActualState("u2", email="dup@x.com"),
+           "u1": ActualState("u1", email="dup@x.com"),
+           "u3": ActualState("u3", email="other@x.com")}
     assert resolve_identities(dup, "dup@x.com") == ["u1", "u2"]   # sorted, both ids
 
 
@@ -143,5 +139,5 @@ def test_resolve_identities_user_id_passthrough():
 
 
 def test_resolve_identities_unknown_exits():
-    with pytest.raises(SystemExit):
+    with pytest.raises(GovernError):
         resolve_identities(_index(), "nobody@x.com")

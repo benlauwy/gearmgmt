@@ -6,8 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from report import (_bucket_date, _day_start_utc, _days, _month_bounds,
-                    _parse_date, _resolve_range)
+from report import _bucket_date, _day_start_utc, _days, _month_bounds, _parse_date, _resolve_range
 
 
 def _args(month=None, frm=None, to=None):

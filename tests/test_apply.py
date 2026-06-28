@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import os
 
-from govern.apply import (apply_outstanding, apply_plan, list_outstanding_plans)
-from govern.plan import Change, Plan, save_plan
 from conftest import FakeClient, read_audit
+
+from govern.apply import apply_outstanding, apply_plan, list_outstanding_plans
+from govern.plan import Change, Plan, save_plan
 
 
 def _change(uid, kind, *, field="limit", before=None, after=None, reason="r",

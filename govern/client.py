@@ -8,9 +8,9 @@ from __future__ import annotations
 import json
 import time
 from typing import Optional
-from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, quote
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from .config import Config
 
@@ -78,6 +78,12 @@ class DevinClient:
                 detail = e.read().decode("utf-8", "replace")
                 raise RuntimeError(f"HTTP {e.code} {method} {url}: {detail}") from e
             except URLError as e:
+                # Transient connection/DNS blips: retry with backoff like 5xx
+                # (HTTPError is a URLError subclass, so it's already handled above).
+                if attempt < self.max_retries:
+                    time.sleep(self.backoff * (attempt + 1))
+                    attempt += 1
+                    continue
                 raise RuntimeError(f"Network error {method} {url}: {e.reason}") from e
 
     def _paginate(self, path: str, params=None) -> list[dict]:

@@ -1,7 +1,7 @@
 """Shared test fixtures: a tmp-backed Config and a recording FakeClient.
 
 The engine talks to the API through a small duck-typed ``client`` and writes its
-state (plans, audit log, snapshots) under ``cfg.path(...)``. These fixtures give
+state (plans, audit log) under ``cfg.path(...)``. These fixtures give
 tests a Config rooted in ``tmp_path`` (so nothing touches the real repo) and a
 FakeClient that records every mutation and mirrors DevinClient's dry-run
 sentinel, so apply/workflow logic can be exercised without a network.
@@ -56,7 +56,8 @@ class FakeClient:
 
     def __init__(self, *, dry_run=False, apply_concurrency=1, read_concurrency=1,
                  sleep=0, invite_uid="user-new", fail_on=None, members=None,
-                 limits=None, utilizations=None, orgs=None, roles=None):
+                 limits=None, utilizations=None, orgs=None, roles=None,
+                 audit_logs=None):
         self.dry_run = dry_run
         self.apply_concurrency = apply_concurrency
         self.read_concurrency = read_concurrency
@@ -69,6 +70,7 @@ class FakeClient:
         # orgs: {org_id: name}; roles: list of role dicts (for list_roles).
         self._orgs = dict(orgs or {})
         self._roles = list(roles or [])
+        self._audit_logs = list(audit_logs or [])
         self.calls: list[tuple] = []
 
     def _maybe_fail(self, name):
@@ -125,6 +127,9 @@ class FakeClient:
 
     def get_user_utilization(self, user_id, time_after=None, time_before=None):
         return dict(self._utilizations.get(user_id, {}))
+
+    def list_all_audit_logs(self, *, action=None, time_after=None, order="asc"):
+        return [e for e in self._audit_logs if action is None or e.get("action") == action]
 
 
 def _toml_value(v) -> str:

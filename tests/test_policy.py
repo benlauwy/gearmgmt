@@ -27,6 +27,17 @@ def test_coerce_limit_rejects_non_positive(value):
         coerce_limit(value)
 
 
+@pytest.mark.parametrize("value, expected", [(0, 0), ("0", 0), (5, 5), ("null", None)])
+def test_coerce_limit_allow_zero(value, expected):
+    # The offboard leaver limit zeroes a cap, so 0 must be accepted there.
+    assert coerce_limit(value, allow_zero=True) == expected
+
+
+def test_coerce_limit_allow_zero_still_rejects_negative():
+    with pytest.raises(ValueError):
+        coerce_limit(-1, allow_zero=True)
+
+
 def test_coerce_limit_rejects_garbage():
     with pytest.raises(ValueError):
         coerce_limit("not-a-number")

@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from govern.plan import (AUTO_APPLY, NEEDS_APPROVAL, Change, Plan, _limit_kind,
-                         diff)
+from govern.plan import AUTO_APPLY, NEEDS_APPROVAL, Change, Plan, diff, limit_kind
 from govern.policy import DesiredState
+from govern.state import ActualState
 
 
-# --- _limit_kind (None == unlimited, ranks highest) -------------------------
+# --- limit_kind (None == unlimited, ranks highest) --------------------------
 @pytest.mark.parametrize("cur, tgt, kind", [
     (50, 100, "limit_increase"),
     (100, 50, "limit_decrease"),
@@ -16,7 +16,7 @@ from govern.policy import DesiredState
     (None, 50, "limit_decrease"),    # unlimited -> number is a decrease
 ])
 def test_limit_kind(cur, tgt, kind):
-    assert _limit_kind(cur, tgt) == kind
+    assert limit_kind(cur, tgt) == kind
 
 
 # --- diff: only checked dimensions, set-to-desired --------------------------
@@ -27,7 +27,7 @@ def _desired(uid, *, limit=None, role=None, check_limit=False, check_role=False,
 
 
 def test_diff_emits_limit_increase_when_checked():
-    actual = {"u1": {"limit": 50, "enterprise_role": {"role_id": "r1"}}}
+    actual = {"u1": ActualState("u1", limit=50, enterprise_role={"role_id": "r1"})}
     desired = {"u1": _desired("u1", limit=100, check_limit=True)}
     changes = diff(actual, desired)
     assert len(changes) == 1
@@ -38,35 +38,35 @@ def test_diff_emits_limit_increase_when_checked():
 
 def test_diff_skips_unchecked_dimensions():
     # Role differs, but check_role is False -> no change emitted.
-    actual = {"u1": {"limit": 100, "enterprise_role": {"role_id": "r1"}}}
+    actual = {"u1": ActualState("u1", limit=100, enterprise_role={"role_id": "r1"})}
     desired = {"u1": _desired("u1", limit=100, role="r2",
                               check_limit=True, check_role=False)}
     assert diff(actual, desired) == []
 
 
 def test_diff_no_change_when_already_at_desired():
-    actual = {"u1": {"limit": 100, "enterprise_role": {"role_id": "r1"}}}
+    actual = {"u1": ActualState("u1", limit=100, enterprise_role={"role_id": "r1"})}
     desired = {"u1": _desired("u1", limit=100, role="r1",
                               check_limit=True, check_role=True)}
     assert diff(actual, desired) == []
 
 
 def test_diff_role_grant_when_actual_none():
-    actual = {"u1": {"limit": 100, "enterprise_role": None}}
+    actual = {"u1": ActualState("u1", limit=100, enterprise_role=None)}
     desired = {"u1": _desired("u1", role="r1", check_role=True)}
     (c,) = diff(actual, desired)
     assert c.kind == "role_grant" and c.before is None and c.after == "r1"
 
 
 def test_diff_role_revoke_when_desired_none():
-    actual = {"u1": {"limit": 100, "enterprise_role": {"role_id": "r1"}}}
+    actual = {"u1": ActualState("u1", limit=100, enterprise_role={"role_id": "r1"})}
     desired = {"u1": _desired("u1", role=None, check_role=True)}
     (c,) = diff(actual, desired)
     assert c.kind == "role_revoke" and c.after is None
 
 
 def test_diff_role_change_when_both_real():
-    actual = {"u1": {"limit": 100, "enterprise_role": {"role_id": "r1"}}}
+    actual = {"u1": ActualState("u1", limit=100, enterprise_role={"role_id": "r1"})}
     desired = {"u1": _desired("u1", role="r2", check_role=True)}
     (c,) = diff(actual, desired)
     assert c.kind == "role_change" and c.before == "r1" and c.after == "r2"
@@ -76,7 +76,7 @@ def test_diff_missing_actual_user_classifies_limit_as_decrease():
     # Characterization of a subtle rule: a user absent from `actual` reads back
     # limit=None, and since None ranks as *unlimited* (highest), setting any
     # numeric cap is a DECREASE (auto-apply), not an increase. This is the same
-    # rule _onboard_row_changes leans on so a new user's cap auto-applies. (In
+    # rule intake.onboard_row_changes leans on so a new user's cap auto-applies. (In
     # practice every diff() caller builds `desired` from `actual`, so a truly
     # missing user is only a theoretical input here.)
     actual = {}

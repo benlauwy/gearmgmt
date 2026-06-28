@@ -27,13 +27,15 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .errors import GovernError
+
 # Pragmatic email check: exactly one "@", non-empty local part, and a dotted
 # domain with no spaces. Good enough to reject typos / stray org names without
 # pretending to fully implement RFC 5322.
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-class RosterError(Exception):
+class RosterError(GovernError):
     """A hard, structural problem with the roster file (caller should exit)."""
 
 
@@ -56,7 +58,7 @@ class Roster:
     warnings: list[str] = field(default_factory=list)
 
     def rows(self):
-        return list(zip(self.emails, self.orgs))
+        return list(zip(self.emails, self.orgs, strict=True))  # always parallel-length
 
 
 def _strip_trailing_empty(row: list[str]) -> list[str]:

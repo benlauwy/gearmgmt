@@ -1,8 +1,9 @@
 """DevinClient.from_config: the single shared client factory (CLI + report)."""
 from __future__ import annotations
 
-from govern.client import DevinClient
 from conftest import make_cfg
+
+from govern.client import DevinClient
 
 
 def test_from_config_reads_api_settings(tmp_path):

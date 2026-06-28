@@ -8,6 +8,8 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
+from .errors import GovernError
+
 
 class MenuUnavailable(RuntimeError):
     """Raised when an interactive menu can't be shown (e.g. not a TTY)."""
@@ -31,7 +33,7 @@ def confirm_yes(message: str, prompt: str = "Press y to continue: ") -> None:
                 if input(prompt).strip() in ("y", "Y"):
                     return
             except EOFError:
-                raise SystemExit("Aborted: confirmation required but no TTY available.")
+                raise GovernError("confirmation required but no TTY available.") from None
 
     import termios
     import tty

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Optional
 
+from . import reports, workflows
 from .client import DevinClient
 from .config import load_config
-from . import workflows
-
+from .errors import GovernError
 
 # Shown as the top-level description AND appended to every subcommand's
 # ``--help`` so a reader always sees what the tool itself is.
@@ -42,15 +43,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     sp.add_argument("--file", required=True,
                     help="path to a CSV or .xlsx roster: an email column and an "
                          "optional group/org-name column (with a header row)")
-
-    add("sync-moves", "re-materialize members who changed orgs since last run "
-                      "(reactive: detects moves via snapshot-diff)")
+    sp.set_defaults(func=_run_onboard)
 
     sp = add("reassign", "bulk-move members from a CSV/.xlsx roster to a new org "
                          "(add to destination + set its role/limit, remove from old org)")
     sp.add_argument("--file", required=True,
                     help="path to a CSV or .xlsx roster: an email column and an "
                          "optional destination group/org-name column (with a header row)")
+    sp.set_defaults(func=_run_reassign)
 
     sp = add("offboard", "remove user(s) from all orgs + zero limit + leaver role")
     g = sp.add_mutually_exclusive_group(required=True)
@@ -60,6 +60,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     g.add_argument("--file", help="path to a CSV/.xlsx roster of emails to "
                                   "offboard in bulk (an email column with a header "
                                   "row; any group/org column is ignored)")
+    sp.set_defaults(func=_run_offboard)
 
     sp = add("reconcile", "report drift of actual vs desired (+ save a plan); "
                           "optionally scoped to a --user/--org and/or --limits-only")
@@ -70,6 +71,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     g.add_argument("--org", help="restrict to one org's members (by org name)")
     sp.add_argument("--limits-only", action="store_true", dest="limits_only",
                     help="reconcile only ACU limits, leaving enterprise roles alone")
+    sp.set_defaults(func=_run_reconcile)
+
     sp = add("usage", "flag users near/at their cap (detection only)")
     sp.add_argument("--reverse", action="store_true",
                     help="reverse the sort order (lowest usage first instead of "
@@ -83,18 +86,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "format is chosen from the extension — .csv/.tsv for "
                          "delimited text or .xlsx for Excel (.xlsx needs "
                          "openpyxl). Works with --user too")
+    sp.set_defaults(func=_run_usage)
+
     add("coverage",
         "per-org report of how many members already match their org's intended "
-        "limit & role (read-only; lists any that don't)")
+        "limit & role (read-only; lists any that don't)").set_defaults(func=_run_coverage)
     add("capacity",
         "sum every member's per-user monthly ACU limit into one enterprise-wide "
-        "total (read-only; counts unlimited/unset members separately)")
+        "total (read-only; counts unlimited/unset members separately)"
+        ).set_defaults(func=_run_capacity)
+
     sp = add("logins",
              "report how many enterprise members have logged in at least once vs "
              "never, with a per-org breakdown (read-only; uses the audit log)")
     sp.add_argument("--dump-never", dest="dump_never", metavar="PATH",
                     help="also write the email addresses of members who have "
                          "never logged in to PATH, one per line")
+    sp.set_defaults(func=_run_logins)
 
     sp = add("lookup", "print the user_id(s) + ACU limit for a member by "
                        "email/user_id (read-only; lists every matching identity)")
@@ -103,6 +111,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "user_id with its ACU limit (one 'user_id<TAB>limit' per "
                          "line), e.g. the okta|Org|... SSO identity plus any "
                          "pending email|... invite")
+    sp.set_defaults(func=_run_lookup)
 
     sp = add("apply", "execute a saved plan (the approval gate); with no plan, "
                       "apply all outstanding plans after a y/N confirm")
@@ -111,6 +120,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "every outstanding plan (asks y/N first)")
     sp.add_argument("--approved", action="store_true",
                     help="also apply held increases / new grants")
+    sp.set_defaults(func=_run_apply)
 
     args = p.parse_args(argv)
     cfg = load_config(getattr(args, "config", None))
@@ -118,40 +128,63 @@ def main(argv: Optional[list[str]] = None) -> int:
         p.error("DEVIN_SERVICE_USER_TOKEN not set (see .env / .env.example)")
     client = DevinClient.from_config(cfg, dry_run=getattr(args, "dry_run", False))
 
-    cmd = args.cmd
-    if cmd == "onboard":
-        workflows.onboard(cfg, client, file=getattr(args, "file", None))
-    elif cmd == "sync-moves":
-        workflows.sync_moves(cfg, client)
-    elif cmd == "reassign":
-        workflows.reassign(cfg, client, file=getattr(args, "file", None))
-    elif cmd == "offboard":
-        workflows.offboard(cfg, client, user_id=getattr(args, "user", None),
-                           org_dissolved=getattr(args, "org_dissolved", None),
-                           file=getattr(args, "file", None))
-    elif cmd == "reconcile":
-        workflows.reconcile(cfg, client, user_id=getattr(args, "user", None),
-                            org=getattr(args, "org", None),
-                            limits_only=getattr(args, "limits_only", False))
-    elif cmd == "usage":
-        workflows.usage(cfg, client, reverse=getattr(args, "reverse", False),
-                        user_id=getattr(args, "user", None),
-                        export=getattr(args, "export", None))
-    elif cmd == "coverage":
-        workflows.coverage(cfg, client)
-    elif cmd == "capacity":
-        workflows.capacity(cfg, client)
-    elif cmd == "logins":
-        workflows.logins(cfg, client, dump_never=getattr(args, "dump_never", None))
-    elif cmd == "lookup":
-        workflows.lookup(cfg, client, user_id=getattr(args, "user", None))
-    elif cmd == "apply":
-        from .apply import apply_outstanding, apply_plan
-        from .plan import load_plan
-        approved = getattr(args, "approved", False)
-        if args.plan:
-            apply_plan(cfg, client, load_plan(args.plan),
-                       approved=approved, plan_path=args.plan)
-        else:
-            apply_outstanding(cfg, client, approved=approved)
+    # Each subparser sets ``func`` to its handler (set_defaults), so dispatch is
+    # a single call — no command if/elif chain. Expected, user-facing problems
+    # surface as GovernError; render them as a clean message + non-zero exit.
+    try:
+        args.func(args, cfg, client)
+    except GovernError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
     return 0
+
+
+# Per-command handlers. Each reads only its own subparser's args (guaranteed
+# present), so there are no defensive getattr lookups for command-specific flags.
+def _run_onboard(args, cfg, client):
+    workflows.onboard(cfg, client, file=args.file)
+
+
+def _run_reassign(args, cfg, client):
+    workflows.reassign(cfg, client, file=args.file)
+
+
+def _run_offboard(args, cfg, client):
+    workflows.offboard(cfg, client, user_id=args.user,
+                       org_dissolved=args.org_dissolved, file=args.file)
+
+
+def _run_reconcile(args, cfg, client):
+    workflows.reconcile(cfg, client, user_id=args.user, org=args.org,
+                        limits_only=args.limits_only)
+
+
+def _run_usage(args, cfg, client):
+    reports.usage(cfg, client, reverse=args.reverse, user_id=args.user,
+                  export=args.export)
+
+
+def _run_coverage(args, cfg, client):
+    reports.coverage(cfg, client)
+
+
+def _run_capacity(args, cfg, client):
+    reports.capacity(cfg, client)
+
+
+def _run_logins(args, cfg, client):
+    reports.logins(cfg, client, dump_never=args.dump_never)
+
+
+def _run_lookup(args, cfg, client):
+    reports.lookup(cfg, client, user_id=args.user)
+
+
+def _run_apply(args, cfg, client):
+    from .apply import apply_outstanding, apply_plan
+    from .plan import load_plan
+    if args.plan:
+        apply_plan(cfg, client, load_plan(args.plan),
+                   approved=args.approved, plan_path=args.plan)
+    else:
+        apply_outstanding(cfg, client, approved=args.approved)

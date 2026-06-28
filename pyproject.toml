@@ -4,3 +4,17 @@
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Beyond the defaults (pyflakes + a few pycodestyle errors) enable import
+# sorting (I), bugbear (B), flake8-simplify (SIM) and Ruff's own lints (RUF),
+# which catch real smells the defaults miss.
+select = ["E", "F", "I", "B", "SIM", "RUF"]
+# E501 (line length): a few help strings / comments run slightly over 100 and
+# reflowing them hurts readability. RUF001-003 (ambiguous unicode): the docs and
+# help text deliberately use em-dashes / middots / arrows.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]

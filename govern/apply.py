@@ -166,20 +166,23 @@ def _apply_user_group(client, cfg: Config, plan: Plan, uid: str, group: list,
         # has assigned a user_id. If the invite hasn't (yet) succeeded, skip.
         if c.kind != "user_invite" and not c.user_id:
             if not resolved_uid:
-                c.status, c.error = "failed", "skipped: invite did not complete"
                 counts["failed"] += 1
                 lines.append(f"  [SKIP]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: invite incomplete")
+                # Mutate this change's status under the same lock that serializes
+                # the whole-plan persist, so a concurrent _persist never captures
+                # a half-written (status, error) pair from another user's worker.
                 with io_lock:
+                    c.status, c.error = "failed", "skipped: invite did not complete"
                     _persist(plan, plan_path)
                 continue
             c.user_id = resolved_uid
         try:
             new_uid = _apply_change(client, c)
-        except Exception as e:  # noqa: BLE001 - record and continue (resumable)
-            c.status, c.error = "failed", str(e)
+        except Exception as e:  # broad by design: record the failure and continue (resumable)
             counts["failed"] += 1
             lines.append(f"  [FAIL]  {c.kind:14} {c.field:16} {c.before} -> {c.after}: {e}")
             with io_lock:
+                c.status, c.error = "failed", str(e)
                 _persist(plan, plan_path)
             continue
         if c.kind == "user_invite":
@@ -193,10 +196,10 @@ def _apply_user_group(client, cfg: Config, plan: Plan, uid: str, group: list,
             counts["would"] += 1
             lines.append(f"  [DRY]   {c.kind:14} {c.field:16} {c.before} -> {c.after}")
         else:
-            c.status, c.error = "applied", None
             counts["applied"] += 1
             lines.append(f"  [OK]    {c.kind:14} {c.field:16} {c.before} -> {c.after}")
             with io_lock:
+                c.status, c.error = "applied", None
                 state.audit(cfg, action=c.kind, user_id=c.user_id or uid, field=c.field,
                             before=c.before, after=c.after, reason=c.reason,
                             triggered_by=triggered_by, dry_run=False)

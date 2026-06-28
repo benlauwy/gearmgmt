@@ -34,19 +34,20 @@ from typing import Optional
 
 from govern.client import DevinClient
 from govern.config import load_config
+from govern.constants import SECONDS_PER_DAY as DAY
+from govern.errors import GovernError
 from govern.state import read_members, resolve_identities
 
 # The daily endpoint splits ACUs into these products; keep a stable column order
 # and append any unknown ones (defensively) after them.
 PRODUCT_ORDER = ["devin", "cascade", "terminal", "review"]
-DAY = 86400
 
 
 def _parse_date(s: str) -> date:
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError:
-        raise SystemExit(f"ERROR: invalid date {s!r} (expected YYYY-MM-DD)")
+        raise SystemExit(f"ERROR: invalid date {s!r} (expected YYYY-MM-DD)") from None
 
 
 def _month_bounds(s: str, today: date) -> tuple[date, date]:
@@ -55,7 +56,7 @@ def _month_bounds(s: str, today: date) -> tuple[date, date]:
     try:
         dt = datetime.strptime(s, "%Y-%m")
     except ValueError:
-        raise SystemExit(f"ERROR: invalid month {s!r} (expected YYYY-MM)")
+        raise SystemExit(f"ERROR: invalid month {s!r} (expected YYYY-MM)") from None
     start = date(dt.year, dt.month, 1)
     nxt = date(dt.year + 1, 1, 1) if dt.month == 12 else date(dt.year, dt.month + 1, 1)
     return start, min(nxt - timedelta(days=1), today)
@@ -151,8 +152,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     start, end, range_label = _resolve_range(args, today)
 
     members = read_members(client)
-    ids = resolve_identities(members, args.user)
-    email = next((members[i].get("email") for i in ids if members[i].get("email")), None)
+    try:
+        ids = resolve_identities(members, args.user)
+    except GovernError as e:
+        raise SystemExit(f"ERROR: {e}") from e
+    email = next((members[i].email for i in ids if members[i].email), None)
 
     totals, per_product, product_cols = _collect(client, ids, start, end)
     days = _days(start, end)

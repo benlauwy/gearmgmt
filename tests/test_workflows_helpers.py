@@ -5,10 +5,19 @@ import csv
 
 import pytest
 
+from govern.errors import GovernError
 from govern.plan import Change
-from govern.workflows import (_export_format, _fmt_limit, _is_admin,
-                              _org_id_by_name, _pct, _render_change, _tag,
-                              _utilization_status, _where, _write_table)
+from govern.population import is_admin as _is_admin
+from govern.population import org_id_by_name as _org_id_by_name
+from govern.render import fmt_limit as _fmt_limit
+from govern.render import pct as _pct
+from govern.render import render_change as _render_change
+from govern.render import tag as _tag
+from govern.render import where as _where
+from govern.reports import export_format as _export_format
+from govern.reports import utilization_status as _utilization_status
+from govern.reports import write_table as _write_table
+from govern.state import ActualState
 
 NOW = 1_000_000
 DAY = 86400
@@ -68,12 +77,12 @@ def test_org_id_by_name_case_insensitive():
 
 
 def test_org_id_unknown_exits():
-    with pytest.raises(SystemExit, match="no org named"):
+    with pytest.raises(GovernError, match="no org named"):
         _org_id_by_name({"o1": "IDE"}, "Nope")
 
 
 def test_org_id_ambiguous_exits():
-    with pytest.raises(SystemExit, match="multiple"):
+    with pytest.raises(GovernError, match="multiple"):
         _org_id_by_name({"o1": "Dup", "o2": "Dup"}, "Dup")
 
 
@@ -86,7 +95,7 @@ def test_export_format_supported(name, fmt):
 
 @pytest.mark.parametrize("name", ["u.xls", "u.xlsm", "u.xlsb", "u", "u.json"])
 def test_export_format_rejected(name):
-    with pytest.raises(SystemExit):
+    with pytest.raises(GovernError):
         _export_format(name)
 
 
@@ -136,10 +145,10 @@ def test_pct(n, d, out):
 
 
 def test_is_admin_matches_role_name_substring_case_insensitive():
-    user = {"enterprise_role": {"role_name": "Enterprise Admin"}}
+    user = ActualState("u", enterprise_role={"role_name": "Enterprise Admin"})
     assert _is_admin(user, ["admin"]) is True
-    assert _is_admin({"enterprise_role": {"role_name": "Member"}}, ["admin"]) is False
-    assert _is_admin({"enterprise_role": None}, ["admin"]) is False
+    assert _is_admin(ActualState("u", enterprise_role={"role_name": "Member"}), ["admin"]) is False
+    assert _is_admin(ActualState("u", enterprise_role=None), ["admin"]) is False
 
 
 # --- change-line rendering (exact-format guards) -----------------------------

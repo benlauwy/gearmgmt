@@ -8,10 +8,10 @@ de-duplicated, so a refactor that changes behaviour is caught.
 from __future__ import annotations
 
 import pytest
+from conftest import FakeClient, ent_role, member, org_role, write_policy
 
 from govern import workflows
-from govern.state import save_snapshot
-from conftest import FakeClient, ent_role, member, org_role, write_policy
+from govern.errors import GovernError
 
 
 # --- reconcile --------------------------------------------------------------
@@ -84,7 +84,7 @@ def test_onboard_single_column_without_tty_errors(cfg, tmp_path):
     client = FakeClient(orgs={"o1": "IDE Standard"}, members=[])
     roster = tmp_path / "roster.csv"
     roster.write_text("email\nnew@x.com\n", encoding="utf-8")
-    with pytest.raises(SystemExit):
+    with pytest.raises(GovernError):
         workflows.onboard(cfg, client, file=str(roster))
 
 
@@ -163,7 +163,7 @@ def test_reconcile_org_scope(cfg, capsys):
 
 def test_reconcile_user_and_org_are_mutually_exclusive(cfg):
     write_policy(cfg, limits={"IDE Standard": 100}, roles={"IDE Standard": "role-ide"})
-    with pytest.raises(SystemExit, match="at most one"):
+    with pytest.raises(GovernError, match="at most one"):
         workflows.reconcile(cfg, _drifting_client(), user_id="low@x.com",
                             org="IDE Standard")
 
@@ -205,22 +205,3 @@ def test_offboard_from_file_resolves_emails(cfg, tmp_path, capsys):
     assert {c.user_id for c in plan.changes} == {"u1", "u2"}
     assert sum(c.kind == "org_remove" for c in plan.changes) == 2
     assert "=== offboard (file:leavers.csv) ===" in out
-
-
-# --- sync-moves -------------------------------------------------------------
-def test_sync_moves_detects_mover_and_rematerializes(cfg, capsys):
-    write_policy(cfg, limits={"IDE Standard": 100, "CLI": 50},
-                 roles={"IDE Standard": "role-ide", "CLI": "role-cli"})
-    save_snapshot(cfg, {"u1": ["o1"]})           # baseline: u1 was in IDE Standard
-    client = FakeClient(
-        orgs={"o1": "IDE Standard", "o2": "CLI"},
-        members=[member("u1", "mover@x.com", [ent_role("role-cli"), org_role("o2", "ro2")])],
-        limits={"u1": {"local_agent": {"cycle_acu_limit": 100}}},
-    )
-    plan = workflows.sync_moves(cfg, client)
-    out = capsys.readouterr().out
-
-    assert "=== sync-moves (membership snapshot-diff) ===" in out
-    assert "mover@x.com" in out
-    # Moved into CLI (limit 50) from a 100 cap -> decrease; role-cli already set.
-    assert {c.kind for c in plan.changes} == {"limit_decrease"}

@@ -7,15 +7,20 @@ from typing import Any, Optional
 from .config import Config, load_toml
 
 
-def coerce_limit(value: Any) -> Optional[int]:
-    """Positive int, or None for unlimited (accepts "null"/"none")."""
+def coerce_limit(value: Any, *, allow_zero: bool = False) -> Optional[int]:
+    """Positive int, or None for unlimited (accepts "null"/"none").
+
+    ``allow_zero`` permits 0 as well — used for the offboard leaver limit, which
+    zeroes (reclaims) a member's cap. Policy limits stay strictly positive.
+    """
     if value is None:
         return None
     if isinstance(value, str) and value.strip().lower() in ("null", "none"):
         return None
     n = int(value)
-    if n <= 0:
-        raise ValueError("limit must be a positive integer or null")
+    if n < (0 if allow_zero else 1):
+        kind = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"limit must be a {kind} integer or null")
     return n
 
 

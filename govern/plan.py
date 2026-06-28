@@ -10,6 +10,7 @@ import json
 import os
 import time
 from dataclasses import asdict, dataclass, field
+from dataclasses import fields as _change_fields
 from typing import Any, Optional
 
 from .config import Config
@@ -62,11 +63,15 @@ class Plan:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Plan":
+        # Tolerate unknown keys so a plan written by a different engine version
+        # (the resume ledger is meant to be durable) loads instead of raising.
+        known = {f.name for f in _change_fields(Change)}
         return cls(
             workflow=d["workflow"],
             created_at=d.get("created_at", 0),
             triggered_by=d.get("triggered_by", "manual"),
-            changes=[Change(**c) for c in d.get("changes", [])],
+            changes=[Change(**{k: v for k, v in c.items() if k in known})
+                     for c in d.get("changes", [])],
         )
 
 
@@ -84,31 +89,32 @@ def load_plan(path: str) -> Plan:
         return Plan.from_dict(json.load(f))
 
 
-def _limit_kind(current, target) -> str:
+def limit_kind(current, target) -> str:
     """Classify a limit change. None == unlimited (ranks highest)."""
     cur = float("inf") if current is None else current
     tgt = float("inf") if target is None else target
     return "limit_increase" if tgt > cur else "limit_decrease"
 
 
-def diff(actual: dict[str, dict], desired: dict[str, object]) -> list[Change]:
+def diff(actual: dict, desired: dict[str, object]) -> list[Change]:
     """Compute the change set between actual and desired per-user state.
 
     Set-to-desired, never increment. Only the dimensions each DesiredState marks
     with check_limit / check_role are compared. Changes are classified so the
     approval gate can split increases/grants (NEEDS_APPROVAL) from
-    revokes/downgrades (AUTO_APPLY).
+    revokes/downgrades (AUTO_APPLY). ``actual`` maps user_id -> ActualState; a
+    user absent from it reads back as no limit / no role.
     """
     changes: list[Change] = []
     for user_id, d in desired.items():
-        a = actual.get(user_id, {})
+        a = actual.get(user_id)
         if getattr(d, "check_limit", False):
-            cur = a.get("limit")
+            cur = a.limit if a else None
             if cur != d.limit:
-                changes.append(Change(user_id, _limit_kind(cur, d.limit), "limit",
+                changes.append(Change(user_id, limit_kind(cur, d.limit), "limit",
                                       cur, d.limit, d.source))
         if getattr(d, "check_role", False):
-            cur = (a.get("enterprise_role") or {}).get("role_id")
+            cur = ((a.enterprise_role if a else None) or {}).get("role_id")
             if cur != d.enterprise_role:
                 if d.enterprise_role is None:
                     kind = "role_revoke"

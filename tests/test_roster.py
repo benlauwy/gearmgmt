@@ -129,7 +129,7 @@ def test_unsupported_extension_is_error(tmp_path):
 
 def test_legacy_xls_is_rejected_with_guidance(tmp_path):
     path = _write(tmp_path, "roster.xls", "anything")
-    with pytest.raises(r.RosterError, match="save as .xlsx"):
+    with pytest.raises(r.RosterError, match=r"save as \.xlsx"):
         r.parse_roster(path, is_valid_org=is_org)
 
 

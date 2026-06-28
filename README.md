@@ -60,7 +60,7 @@ works* (next section) for the approval gate.
 
 The four commands below cover the everyday lifecycle — **onboard → reconcile →
 usage → offboard**. See *Commands* (section 4) for the full set, including
-`coverage`, `sync-moves`, and `reassign`.
+`coverage` and `reassign`.
 
 ### New people join → `onboard`
 `onboard` **invites** users from a roster file (CSV or `.xlsx`) and materializes
@@ -98,9 +98,7 @@ to a new org from the same kind of roster. For each row it adds the member to th
 destination org, sets that org's enterprise role (`roles.toml`) and ACU limit
 (`limits.toml`), then removes them from their other governed orgs (ungoverned
 memberships are left alone). Every email must already be an enterprise user —
-unknown emails fail up front (use `onboard` to invite new ones). This is the
-proactive, file-driven counterpart to `sync-moves`, which instead *detects* org
-changes that already happened.
+unknown emails fail up front (use `onboard` to invite new ones).
 
 The roster is the same shape as onboard's: two columns (email + **destination**
 group), or one column (email only) where you pick a single destination from an
@@ -244,7 +242,6 @@ Add `--dry-run` to any command to simulate without writing anything.
 | `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
 | `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s) + ACU limit. An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line as `user_id<TAB>limit` (the per-user monthly Local Agent ACU cap, or `unlimited`/`unset`). Pipe through `cut -f1` to feed a shell variable/pipeline with just the id |
 | `onboard --file PATH` | Invite users from a CSV/`.xlsx` roster; add to org + set role + limit → plan |
-| `sync-moves` | Detect users who changed orgs since last run (reactive snapshot-diff) → plan |
 | `reassign --file PATH` | Bulk-move existing members to a new org from a CSV/`.xlsx` roster: add to destination + set role/limit, remove from old governed org → plan |
 | `offboard --user USER \| --file PATH \| --org-dissolved NAME` | Zero limit + remove from all orgs + leaver role, for one user, a roster of emails, or every member of a dissolved org → plan |
 | `apply [PLAN] [--approved]` | Execute a saved plan (gated, audited, resumable); with no `PLAN`, apply all outstanding plans after a y/N confirm |
@@ -274,7 +271,6 @@ the command): `--dry-run`, `--config PATH`.
 - `audit.jsonl` — append-only audit log (who/what/when/why/triggered-by).
 - `state/plans/*.json` — saved plans + resume status (outstanding plans).
 - `state/plans/archive/*.json` — plans retired here once fully applied.
-- `state/membership.json` — last membership snapshot (for `sync-moves`).
 - `state/usage-candidates.json` — last full-population `usage` output (`usage --user` spot-checks don't touch it).
 
 ---
@@ -289,8 +285,6 @@ the command): `--dry-run`, `--config PATH`.
   *set* to another role. The normal workflows never try to clear one.
 - **IDP-group-derived memberships** can't be removed by `offboard`/`apply`
   (direct org-role assignments only) — manage those via IDP configuration.
-- **`sync-moves` is reactive** via snapshot diffing; run it on a schedule. The
-  first run just records a baseline.
 
 ---
 
