@@ -50,6 +50,41 @@ def test_reconcile_reports_drift_violation_and_tags(cfg, capsys):
     assert "Violations" in out and "multi@x.com" in out
 
 
+def test_reconcile_governs_admin_limits_via_admin_org(cfg, capsys):
+    # Admins are limit-governed from the Admin Org limit (role left alone). An
+    # admin outside the Admin Org still gets that limit but is flagged.
+    write_policy(cfg, limits={"Admin Org": 1000, "IDE Standard": 100},
+                 roles={"Admin Org": "role-admin", "IDE Standard": "role-ide"})
+    client = FakeClient(
+        orgs={"oa": "Admin Org", "o1": "IDE Standard"},
+        members=[
+            member("a1", "admin1@x.com",
+                   [ent_role("role-adm", "Admin"), org_role("oa", "roa")]),
+            member("a2", "admin2@x.com",   # admin, but NOT in the Admin Org
+                   [ent_role("role-adm", "Admin no Devin"), org_role("o1", "ro1")]),
+            member("a3", "admin3@x.com",   # already at the Admin Org limit
+                   [ent_role("role-adm", "Admin"), org_role("oa", "roa")]),
+        ],
+        limits={"a3": {"local_agent": {"cycle_acu_limit": 1000}}},
+    )
+    plan = workflows.reconcile(cfg, client)
+    out = capsys.readouterr().out
+
+    by_user = {c.user_id: c for c in plan.changes}
+    # a1: admin in the Admin Org, unset -> its 1000 limit, reason "admin".
+    # (unset ranks as unlimited, so applying a cap classifies as a decrease.)
+    assert by_user["a1"].field == "limit" and by_user["a1"].after == 1000
+    assert by_user["a1"].kind == "limit_decrease" and by_user["a1"].reason == "admin"
+    # a2: admin NOT in the Admin Org -> still 1000, but flagged source.
+    assert by_user["a2"].after == 1000
+    assert by_user["a2"].reason == "admin-no-admin-org"
+    assert "a3" not in by_user                       # already compliant
+    assert all(c.field == "limit" for c in plan.changes)  # roles never touched
+
+    assert "Admins (limit-governed via Admin Org" in out
+    assert "WARNING:" in out and "admin2@x.com" in out
+
+
 # --- onboard ----------------------------------------------------------------
 def test_onboard_two_column_invite_plus_existing(cfg, tmp_path, capsys):
     write_policy(cfg, limits={"IDE Standard": 100}, roles={"IDE Standard": "role-ide"})

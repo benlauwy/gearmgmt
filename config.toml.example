@@ -16,9 +16,13 @@ state_dir     = "state"           # snapshots + plan/resume files
 
 [governance]
 # A user whose ENTERPRISE role name contains any of these (case-insensitive) is
-# treated as an ADMIN: allowed in multiple orgs and exempt from member
-# governance / reconcile correction.
+# treated as an ADMIN: allowed in multiple orgs and exempt from the single-org
+# rule and from enterprise-ROLE governance. Their ACU LIMIT is still governed,
+# sourced from the Admin Org below (overrides.toml still wins).
 admin_role_name_contains = ["Admin"]
+# The org whose limits.toml entry provides every admin's ACU limit. An admin who
+# is not a member of this org still gets its limit, but reconcile flags them.
+admin_org_name = "Admin Org"
 
 [leaver]
 # On offboard, zero the limit, remove the user from ALL orgs, then set this

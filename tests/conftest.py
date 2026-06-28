@@ -27,7 +27,8 @@ def make_cfg(tmp_path, **overrides) -> Config:
     }
     kwargs = dict(
         paths=paths,
-        governance={"admin_role_name_contains": ["Admin"]},
+        governance={"admin_role_name_contains": ["Admin"],
+                    "admin_org_name": "Admin Org"},
         leaver={"enterprise_role_id": "role-leaver", "limit": 0},
         utilization={},
         api={},

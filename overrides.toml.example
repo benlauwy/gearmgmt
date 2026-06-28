@@ -11,10 +11,11 @@
 #   enterprise_role  (optional) — pinned enterprise role_id
 #
 # NOTE: Admins (enterprise role name contains "Admin"; see config.toml
-# [governance].admin_role_name_contains) are ALREADY exempt from member
-# governance and from the single-org rule, so they do not strictly need an
-# entry here. Add an entry only to PIN a specific limit/role for a user, or to
-# exempt a non-admin from reconciliation.
+# [governance].admin_role_name_contains) are exempt from the single-org rule and
+# from enterprise-ROLE governance, but their LIMIT IS governed -- sourced from
+# the Admin Org ([governance].admin_org_name). Pin an admin here to give them a
+# limit (or role) different from that default, or to exempt a non-admin from
+# reconciliation.
 
 # Example entry (uncomment and replace the key + values with your own):
 # ["okta|YourEnterprise|00uXXXXXXXXXXXXXXXXX"]

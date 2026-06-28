@@ -357,8 +357,9 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
       - ``limits_only`` (--limits-only) — only ACU-limit drift, leaving roles
         alone (the single-user form is the usage-driven upgrade).
 
-    Honors overrides, admin-exemption, and the single-governed-org rule, and
-    flags non-admins in >1 org. ``--user`` and ``--org`` are mutually exclusive."""
+    Honors overrides, admin limit-governance (via the Admin Org, with roles and
+    the single-org rule left exempt), and the single-governed-org rule, and flags
+    non-admins in >1 org. ``--user`` and ``--org`` are mutually exclusive."""
     if user_id and org:
         raise GovernError("reconcile takes at most one of --user / --org")
 
@@ -403,7 +404,10 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
                                  suffix=f"  ({c.reason})"))
         print()
 
-    exempt = [uid for uid, d in desired.items() if d.source == "admin-exempt"]
+    admins = [uid for uid, d in desired.items()
+              if d.source in ("admin", "admin-no-admin-org")]
+    admin_no_org = [uid for uid, d in desired.items()
+                    if d.source == "admin-no-admin-org"]
     violations = [(uid, d) for uid, d in desired.items() if d.source == "violation"]
     no_org = [uid for uid, d in desired.items() if d.source == "no-governed-org"]
     orphans = {}
@@ -414,10 +418,15 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
         if unknown:
             orphans[uid] = unknown
 
-    print(f"Exempt (admins): {len(exempt)}")
-    for uid in exempt:
+    print(f"Admins (limit-governed via Admin Org; role & single-org exempt): {len(admins)}")
+    for uid in admins:
         rn = (actual[uid].enterprise_role or {}).get("role_name")
         print(f"  - {email(uid)} ({rn})")
+    if admin_no_org:
+        print(f"WARNING: {len(admin_no_org)} admin(s) not in the Admin Org "
+              "(its limit is applied anyway):")
+        for uid in admin_no_org:
+            print(f"  - {email(uid)}")
     if violations:
         print(f"Violations (non-admin in multiple governed orgs): {len(violations)}")
         for uid, d in violations:

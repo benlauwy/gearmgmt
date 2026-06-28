@@ -188,9 +188,13 @@ The engine governs two per-user dimensions:
 
 1. **`overrides.toml`** — if the user is listed, their pinned values win and they
    are excluded from correction.
-2. **Admin-exempt** — if the user's *actual* enterprise role name contains an
-   admin keyword (`config.toml [governance].admin_role_name_contains`), they are
-   left alone and may belong to many orgs.
+2. **Admin** — if the user's *actual* enterprise role name contains an admin
+   keyword (`config.toml [governance].admin_role_name_contains`), they keep their
+   role and may belong to many orgs (no role/single-org correction), but their
+   **limit is still governed** — sourced from the **Admin Org**
+   (`[governance].admin_org_name`, default `"Admin Org"`). An admin who is *not*
+   a member of the Admin Org still gets that limit, but `reconcile` flags them
+   with a warning.
 3. **Policy** — otherwise the user's single governed org determines limit + role.
 4. **Flags** — a non-admin in **0** governed orgs → `no-governed-org`; in **>1** →
    `violation` (the single-org rule).
@@ -236,8 +240,8 @@ Add `--dry-run` to any command to simulate without writing anything.
 | Command | What it does |
 |---|---|
 | `reconcile [--user USER \| --org NAME] [--limits-only]` | Report drift (actual vs desired) and save a plan. Covers **everyone** and both dimensions (limits + roles) by default; scope it to one `--user`/`--org`, and/or pass `--limits-only` to reconcile just ACU limits. `reconcile --user USER --limits-only` is the usage-driven single-user upgrade |
-| `coverage` | Per-org intended-vs-actual limit & role coverage |
-| `capacity` | Sum every member's per-user monthly ACU limit into one enterprise-wide total (read-only); unlimited & unset members are counted separately, not folded into the total |
+| `coverage` | Per-org intended-vs-actual limit & role coverage. Admins are role-exempt (kept out of every org's role coverage), but their limit is folded into the **Admin Org's** limit coverage |
+| `capacity` | Sum every member's per-user monthly ACU limit into one enterprise-wide total (read-only). A limit pinned in `overrides.toml` wins over the live value — finite overrides are folded into the total (even over an unset/unlimited live value), unlimited ones count as unlimited; unlimited & unset members are counted separately, not folded into the total |
 | `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first. `--user EMAIL_OR_USER_ID` restricts the report to a single member (a spot-check) — it prints just that row and does **not** overwrite the shared `state/usage-candidates.json` worklist. `--export PATH` also writes the full table (all rows, not just candidates) as CSV or Excel, chosen by the extension (`.csv`/`.tsv` or `.xlsx`; Excel needs openpyxl) |
 | `logins` | How many enterprise members have logged in at least once vs never (from the audit log), with a per-org breakdown. `--dump-never PATH` also writes the never-logged-in emails to PATH, one per line |
 | `lookup --user USER` | Resolve a member by email (or user_id) and print their user_id(s) + ACU limit. An email can map to several identities (e.g. a pending `email\|...` invite plus the authenticated `okta\|Org\|...` / `user-...` id), so it prints **every** match, one per line as `user_id<TAB>limit` (the per-user monthly Local Agent ACU cap, or `unlimited`/`unset`). Pipe through `cut -f1` to feed a shell variable/pipeline with just the id |
@@ -260,8 +264,8 @@ the command): `--dry-run`, `--config PATH`.
 - `roles.toml` — per-org desired enterprise `role_id`. *(git-ignored — copy from `roles.toml.example`)*
 - `overrides.toml` — per-user exceptions, keyed by `user_id` (honored, excluded
   from correction; this is where admins are pinned). *(git-ignored — copy from `overrides.toml.example`)*
-- `config.toml` — admin detection, leaver role/limit, near-cap thresholds, retry,
-  invite org-role (`[invite]`). *(git-ignored — copy from `config.toml.example`)*
+- `config.toml` — admin detection + Admin Org name, leaver role/limit, near-cap
+  thresholds, retry, invite org-role (`[invite]`). *(git-ignored — copy from `config.toml.example`)*
 
 > `config.toml`, `roles.toml`, and `overrides.toml` hold tenant-specific IDs / PII,
 > so they are git-ignored and committed only as `*.example` templates. Keep your

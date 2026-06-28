@@ -58,6 +58,7 @@ def test_usage_single_user_spot_check_does_not_touch_worklist(cfg, capsys):
 
 # --- capacity ---------------------------------------------------------------
 def test_capacity_sums_numeric_and_counts_uncapped(cfg, capsys):
+    write_policy(cfg)  # capacity now reads overrides.toml (here: none)
     client = FakeClient(
         members=[member(f"u{i}", f"{i}@x.com", [ent_role("role-ide")]) for i in range(3)],
         limits={"u0": {"local_agent": {"cycle_acu_limit": 100}},   # numeric
@@ -68,8 +69,33 @@ def test_capacity_sums_numeric_and_counts_uncapped(cfg, capsys):
     out = capsys.readouterr().out
 
     assert result == {"total": 100, "numeric": 1, "unlimited": 1,
-                      "unset": 1, "population": 3}
+                      "unset": 1, "population": 3, "from_overrides": 0}
     assert "TOTAL monthly ACU limit: 100" in out
+
+
+def test_capacity_folds_finite_overrides(cfg, capsys):
+    # A finite overrides.toml limit is folded into the total (even over an unset
+    # or differing live value); an unlimited ("null") override counts as unlimited.
+    write_policy(cfg, overrides={
+        "u0": {"reason": "pinned higher", "limit": 500},    # live 100 -> count 500
+        "u2": {"reason": "pin a cap", "limit": 300},        # live unset -> count 300
+        "u3": {"reason": "pin unlimited", "limit": "null"}, # live 100 -> unlimited
+    })
+    client = FakeClient(
+        members=[member(f"u{i}", f"{i}@x.com", [ent_role("role-ide")]) for i in range(4)],
+        limits={"u0": {"local_agent": {"cycle_acu_limit": 100}},
+                "u1": {"local_agent": {"cycle_acu_limit": 200}},   # no override
+                "u2": {},                                           # unset, pinned 300
+                "u3": {"local_agent": {"cycle_acu_limit": 100}}},
+    )
+    result = reports.capacity(cfg, client)
+    out = capsys.readouterr().out
+
+    # 500 (u0 override) + 200 (u1 live) + 300 (u2 override) = 1000; u3 -> unlimited
+    assert result == {"total": 1000, "numeric": 3, "unlimited": 1,
+                      "unset": 0, "population": 4, "from_overrides": 2}
+    assert "TOTAL monthly ACU limit: 1,000" in out
+    assert "2 pinned by overrides.toml" in out
 
 
 # --- coverage ---------------------------------------------------------------
@@ -90,6 +116,45 @@ def test_coverage_reports_per_org_and_mismatches(cfg, capsys):
     assert "=== coverage (read-only) ===" in out
     assert "Org: IDE Standard" in out
     assert "drift@x.com" in out and "want 100" in out
+
+
+def test_coverage_folds_admins_into_admin_org_limit(cfg, capsys):
+    # Admins' limit is governed by the Admin Org, so they count toward ITS limit
+    # coverage (and show as mismatches there) but never toward role coverage. A
+    # pinned (overrides.toml) admin is an exception, excluded from coverage.
+    write_policy(cfg,
+                 limits={"Admin Org": 1000, "IDE Standard": 100},
+                 roles={"Admin Org": "role-admin", "IDE Standard": "role-ide"},
+                 overrides={"a3": {"reason": "pinned", "limit": "null"}})
+    client = FakeClient(
+        orgs={"oa": "Admin Org", "o1": "IDE Standard"},
+        members=[
+            member("a1", "admin-ok@x.com",
+                   [ent_role("role-x", "Admin"), org_role("oa", "roa")]),
+            member("a2", "admin-bad@x.com",
+                   [ent_role("role-x", "Admin"), org_role("oa", "roa")]),
+            member("a3", "admin-pinned@x.com",
+                   [ent_role("role-x", "Admin"), org_role("oa", "roa")]),
+            member("u1", "ide@x.com",
+                   [ent_role("role-ide"), org_role("o1", "ro1")]),
+        ],
+        limits={"a1": {"local_agent": {"cycle_acu_limit": 1000}},  # matches Admin Org
+                "a2": {"local_agent": {"cycle_acu_limit": 500}},   # wrong
+                "a3": {"local_agent": {"cycle_acu_limit": 7}},     # wrong, but pinned
+                "u1": {"local_agent": {"cycle_acu_limit": 100}}},
+    )
+    reports.coverage(cfg, client)
+    out = capsys.readouterr().out
+
+    # Admin Org folds in the 2 un-pinned admins (1 ok) and flags the bad one.
+    assert "Org: Admin Org" in out
+    assert "limit coverage: 1/2 member(s) at intended incl. admins" in out
+    assert "admin-bad@x.com" in out and "want 1000" in out
+    # The pinned admin is excluded entirely (not a mismatch despite limit 7).
+    assert "admin-pinned@x.com" not in out
+    assert "pinned/override: 1" in out
+    # Admins are never counted toward role coverage (role exempt).
+    assert "role  coverage: 0/0 non-admin member(s) at intended" in out
 
 
 # --- logins -----------------------------------------------------------------

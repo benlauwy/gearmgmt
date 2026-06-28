@@ -45,7 +45,8 @@ class DesiredState:
     user_id: str
     limit: Optional[int]
     enterprise_role: Optional[str]
-    # source: "override" | "admin-exempt" | "policy:<org>" | "no-governed-org" | "violation"
+    # source: "override" | "admin" | "admin-no-admin-org" | "policy:<org>"
+    #         | "no-governed-org" | "violation"
     source: str
     check_limit: bool = False  # whether the limit should be reconciled for this user
     check_role: bool = False   # whether the enterprise role should be reconciled
@@ -58,7 +59,10 @@ def resolve_desired(user_id: str, member_org_names: list[str], *,
 
     Rules (source-of-truth precedence):
       1. overrides.toml wins outright; only the fields it specifies are reconciled.
-      2. admins are exempt from member governance and may be multi-org -> not governed.
+      2. admins are exempt from the single-org rule and from enterprise-ROLE
+         governance, but their LIMIT is governed from the Admin Org's policy
+         entry (cfg.governance.admin_org_name). An admin who is NOT a member of
+         the Admin Org still gets that limit but is flagged ("admin-no-admin-org").
       3. otherwise the user's single governed org determines limit + enterprise role
          (only the dimensions that org has a policy entry for are reconciled).
       4. a non-admin in 0 governed orgs -> "no-governed-org"; in >1 -> "violation".
@@ -82,8 +86,21 @@ def resolve_desired(user_id: str, member_org_names: list[str], *,
         )
 
     if is_admin:
-        return DesiredState(user_id, None, None, "admin-exempt",
-                            note="admin: multi-org allowed, not governed")
+        # Admins keep their role and may be multi-org (no role/violation check),
+        # but their LIMIT is governed from the Admin Org's policy entry. A
+        # non-member of the Admin Org still gets that limit, just flagged.
+        admin_org = cfg.governance.get("admin_org_name", "Admin Org")
+        in_admin_org = admin_org in member_org_names
+        return DesiredState(
+            user_id=user_id,
+            limit=policy.limits.get(admin_org),
+            enterprise_role=None,
+            source="admin" if in_admin_org else "admin-no-admin-org",
+            check_limit=admin_org in policy.limits,
+            check_role=False,
+            note="" if in_admin_org
+                 else f"admin not in {admin_org!r}; applying its limit anyway",
+        )
 
     governed = [n for n in member_org_names if n in policy.roles or n in policy.limits]
     if not governed:

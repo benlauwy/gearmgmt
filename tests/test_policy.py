@@ -77,11 +77,46 @@ def test_override_limit_is_coerced(cfg):
     assert d.limit is None  # "null" -> unlimited
 
 
-def test_admin_is_exempt_and_ungoverned(cfg):
+def test_admin_limit_governed_by_admin_org_role_exempt(cfg):
+    # Admins are limit-governed from the Admin Org (overrides aside), may be
+    # multi-org (no violation), and keep their role (check_role False).
+    pol = _policy(limits={"Admin Org": 1000, "IDE": 100},
+                  roles={"Admin Org": "role-admin", "IDE": "role-ide"})
+    d = resolve_desired("u1", ["Admin Org", "IDE", "CLI"], is_admin=True,
+                        policy=pol, cfg=cfg)
+    assert d.source == "admin"
+    assert d.limit == 1000
+    assert d.enterprise_role is None
+    assert d.check_limit is True and d.check_role is False
+
+
+def test_admin_not_in_admin_org_is_flagged_but_still_limited(cfg):
+    # An admin who is not a member of the Admin Org still gets its limit, but is
+    # flagged via the "admin-no-admin-org" source + a note.
+    pol = _policy(limits={"Admin Org": 1000}, roles={"Admin Org": "role-admin"})
+    d = resolve_desired("u1", ["IDE"], is_admin=True, policy=pol, cfg=cfg)
+    assert d.source == "admin-no-admin-org"
+    assert d.limit == 1000 and d.check_limit is True
+    assert d.check_role is False
+    assert "Admin Org" in d.note
+
+
+def test_admin_with_no_admin_org_limit_policy_is_not_limit_checked(cfg):
+    # If the Admin Org has no limits.toml entry there is nothing to apply, so the
+    # limit is left ungoverned (check_limit False) rather than forced to unlimited.
     pol = _policy(limits={"IDE": 100}, roles={"IDE": "role-ide"})
-    d = resolve_desired("u1", ["IDE", "CLI"], is_admin=True, policy=pol, cfg=cfg)
-    assert d.source == "admin-exempt"
+    d = resolve_desired("u1", ["IDE"], is_admin=True, policy=pol, cfg=cfg)
+    assert d.source == "admin-no-admin-org"
     assert d.check_limit is False and d.check_role is False
+
+
+def test_admin_org_name_is_configurable(cfg):
+    # The Admin Org name comes from cfg.governance.admin_org_name.
+    cfg.governance["admin_org_name"] = "Ops Admins"
+    pol = _policy(limits={"Ops Admins": 500}, roles={"Ops Admins": "role-admin"})
+    d = resolve_desired("u1", ["Ops Admins"], is_admin=True, policy=pol, cfg=cfg)
+    assert d.source == "admin"
+    assert d.limit == 500 and d.check_limit is True
 
 
 def test_single_governed_org_sets_limit_and_role(cfg):

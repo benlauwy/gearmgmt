@@ -15,6 +15,7 @@ from typing import Optional
 from .config import Config
 from .constants import SECONDS_PER_DAY
 from .errors import GovernError
+from .policy import coerce_limit, load_policy
 from .population import is_admin, resolve_population
 from .render import fmt_limit, pct
 from .state import (
@@ -247,25 +248,40 @@ def capacity(cfg: Config, client):
     user's current limit (like `usage`/`coverage`) and only prints; it writes no
     plan and mutates nothing.
 
-    Only numeric per-user caps are summable, so members whose limit is
-    *unlimited* (an explicit no-cap override) or *unset* (no override at all)
-    can't be folded into the total — they are counted and reported separately
-    so the headline figure isn't silently undercounting uncapped usage."""
+    A limit pinned in overrides.toml is the source of truth and wins over the
+    live value: a *finite* override is folded into the total (even when the live
+    value is unset/unlimited/different), and an *unlimited* override counts as
+    unlimited. Only numeric caps are summable, so members whose effective limit
+    is *unlimited* or *unset* can't be folded into the total — they are counted
+    and reported separately so the headline figure isn't silently undercounting
+    uncapped usage."""
     actual = read_actual(client)
+    overrides = load_policy(cfg).overrides
 
-    numeric = [a.limit for a in actual.values()
-               if isinstance(a.limit, (int, float))]
-    unlimited = sum(1 for a in actual.values()
-                    if a.limit_set and a.limit is None)
-    unset = sum(1 for a in actual.values() if not a.limit_set)
+    def effective(uid, a):
+        """The limit that counts toward capacity as ``(limit, is_set, pinned)``:
+        an overrides.toml ``limit`` (finite or "null"=unlimited) wins over the
+        live value; otherwise the actual live limit."""
+        ov = overrides.get(uid)
+        if ov is not None and "limit" in ov:
+            return coerce_limit(ov["limit"]), True, True
+        return a.limit, a.limit_set, False
+
+    eff = [effective(uid, a) for uid, a in actual.items()]
+    numeric = [lim for lim, _s, _p in eff if isinstance(lim, (int, float))]
+    unlimited = sum(1 for lim, s, _p in eff if s and lim is None)
+    unset = sum(1 for lim, s, _p in eff if not s)
+    pinned = sum(1 for lim, _s, p in eff if p and isinstance(lim, (int, float)))
     total = sum(numeric)
     total_str = f"{int(total):,}" if float(total).is_integer() else f"{total:,.1f}"
     w = len(str(len(actual)))
 
     print("=== capacity (read-only) ===")
-    print("Sum of every member's per-user monthly Local Agent ACU limit.\n")
+    print("Sum of every member's per-user monthly Local Agent ACU limit "
+          "(overrides.toml wins over the live value).\n")
     print(f"Population: {len(actual)} member(s)")
-    print(f"  with a numeric monthly cap : {len(numeric):>{w}}")
+    print(f"  with a numeric monthly cap : {len(numeric):>{w}}"
+          + (f"   ({pinned} pinned by overrides.toml)" if pinned else ""))
     print(f"  unlimited (explicit no-cap): {unlimited:>{w}}")
     print(f"  unset (no override)        : {unset:>{w}}")
     print(f"\nTOTAL monthly ACU limit: {total_str}"
@@ -274,16 +290,25 @@ def capacity(cfg: Config, client):
         print(f"Note: {unlimited} uncapped (unlimited) member(s) are NOT in the "
               f"total — their usage has no ceiling.")
     return {"total": total, "numeric": len(numeric),
-            "unlimited": unlimited, "unset": unset, "population": len(actual)}
+            "unlimited": unlimited, "unset": unset, "population": len(actual),
+            "from_overrides": pinned}
 
 
 def coverage(cfg: Config, client):
     """Per-org compliance report: for each governed org, show its intended limit
-    and role and how many of its (non-admin) members already match them, listing
-    any members that don't. Read-only — it prints a summary and writes no plan;
-    use `reconcile` when you want that drift turned into an applyable plan."""
+    and role and how many of its members already match them, listing any that
+    don't. Read-only — it prints a summary and writes no plan; use `reconcile`
+    when you want that drift turned into an applyable plan.
+
+    Non-admins are measured against their single governed org. Admins keep their
+    role, so they are excluded from every org's ROLE coverage; their LIMIT is
+    governed from the Admin Org (cfg.governance.admin_org_name), so they are
+    folded into that one org's LIMIT coverage (and no other org's). Users pinned
+    in overrides.toml are exceptions excluded from correction, so they are left
+    out of the coverage counts/mismatches entirely (reported as pinned)."""
     actual, _desired, org_index, pol = resolve_population(cfg, client)
     admin_subs = [s.lower() for s in cfg.governance.get("admin_role_name_contains", [])]
+    admin_org_name = cfg.governance.get("admin_org_name", "Admin Org")
     orgs = sorted(org_index.items(), key=lambda kv: kv[1])  # (org_id, name)
 
     members_by_org: dict[str, list[str]] = {}
@@ -299,29 +324,43 @@ def coverage(cfg: Config, client):
         has_limit, has_role = name in pol.limits, name in pol.roles
         intended_limit, intended_role = pol.limits.get(name), pol.roles.get(name)
         members = members_by_org.get(oid, [])
-        governed = [u for u in members if not is_admin(actual[u], admin_subs)]
-        admins = len(members) - len(governed)
+        # overrides.toml users are pinned exceptions excluded from correction, so
+        # they are excluded from the coverage populations (and reported as pinned).
+        pinned = [u for u in members if u in pol.overrides]
+        non_admins = [u for u in members
+                      if u not in pol.overrides and not is_admin(actual[u], admin_subs)]
+        admins_here = [u for u in members
+                       if u not in pol.overrides and is_admin(actual[u], admin_subs)]
+        # LIMIT is governed here for non-admins (their single org) plus admins
+        # iff this is the Admin Org (admins' limit is sourced from it). ROLE is
+        # governed for non-admins only — admins keep their role.
+        folds_admins = name == admin_org_name and has_limit
+        limit_pop = non_admins + (admins_here if folds_admins else [])
+        role_pop = set(non_admins)
 
-        lim_ok = sum(1 for u in governed if actual[u].limit == intended_limit)
-        role_ok = sum(1 for u in governed
+        lim_ok = sum(1 for u in limit_pop if actual[u].limit == intended_limit)
+        role_ok = sum(1 for u in non_admins
                       if (actual[u].enterprise_role or {}).get("role_id") == intended_role)
 
         il = fmt_limit(intended_limit) if has_limit else "(ungoverned)"
+        pin = f", pinned/override: {len(pinned)}" if pinned else ""
         print(f"Org: {name}")
         print(f"  intended: limit={il}  role={intended_role or '(ungoverned)'}")
-        print(f"  members: {len(members)} (admins/exempt: {admins}, governed: {len(governed)})")
+        print(f"  members: {len(members)} (admins: {len(admins_here)}, "
+              f"non-admin: {len(non_admins)}{pin})")
         if has_limit:
-            print(f"  limit coverage: {lim_ok}/{len(governed)} governed member(s) at intended")
+            incl = " incl. admins" if folds_admins and admins_here else ""
+            print(f"  limit coverage: {lim_ok}/{len(limit_pop)} member(s) at intended{incl}")
         if has_role:
-            print(f"  role  coverage: {role_ok}/{len(governed)} governed member(s) at intended")
+            print(f"  role  coverage: {role_ok}/{len(non_admins)} non-admin member(s) at intended")
 
         mismatches = []
-        for u in governed:
+        for u in limit_pop:  # superset of role_pop, so it covers both dimensions
             problems = []
             if has_limit and actual[u].limit != intended_limit:
                 problems.append(f"limit {fmt_limit(actual[u].limit, actual[u].limit_set)} "
                                 f"(want {fmt_limit(intended_limit)})")
-            if has_role:
+            if has_role and u in role_pop:
                 cur = (actual[u].enterprise_role or {}).get("role_id")
                 if cur != intended_role:
                     problems.append(f"role {cur} (want {intended_role})")
