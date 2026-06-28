@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# Run from the repo root so `import govern` / `import report` resolve without an
+# install step (the project is run via `python govern.py`, not pip-installed).
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
