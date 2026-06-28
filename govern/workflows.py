@@ -1,7 +1,7 @@
 """Workflow orchestration.
 
 Action commands build a Plan (diff-first) applied through the apply gate:
-  onboard · move · reassign · offboard · reconcile
+  onboard · sync-moves · reassign · offboard · reconcile
 Read-only reports (mutate nothing; usage/coverage/logins also write no plan):
   reconcile · usage · coverage · logins
 """
@@ -69,6 +69,13 @@ def _render_change(c: Change, *, label: str, show_field: bool = True,
     field = f"{c.field:16} " if show_field else ""
     return (f"  [{_tag(c):8}] {c.kind:14} {field}{label:34} "
             f"{c.before} -> {c.after}{where}{suffix}")
+
+
+def _plan_footer(path: str, apply_hint: str) -> None:
+    """Print the standard action-command footer: a blank line, the saved-plan
+    path, and the command-specific ``Apply with``/``Apply drift with`` hint."""
+    print(f"\nPlan saved: {path}")
+    print(apply_hint)
 
 
 def _org_id_by_name(org_index: dict, name: str) -> str:
@@ -398,12 +405,12 @@ def onboard(cfg: Config, client, *, file: Optional[str] = None):
         print(_render_change(c, label=c.subject, where=_where(org_index, c)))
     if not changes:
         print("  (no changes — everyone in the roster already matches policy)")
-    print(f"\nPlan saved: {path}")
-    print(f"Apply with:  python govern.py apply {path} --approved   # invites/grants are gated")
+    _plan_footer(path, f"Apply with:  python govern.py apply {path} --approved   "
+                       "# invites/grants are gated")
     return plan
 
 
-def move_members(cfg: Config, client):
+def sync_moves(cfg: Config, client):
     """Re-materialize members who changed orgs since the last run.
 
     Detects users whose org set changed (membership snapshot-diff) and re-resolves
@@ -422,7 +429,7 @@ def move_members(cfg: Config, client):
     def names(ids):
         return [org_index.get(o, f"<unknown:{o}>") for o in ids]
 
-    print("=== move (membership snapshot-diff) ===")
+    print("=== sync-moves (membership snapshot-diff) ===")
     if not prev:
         save_snapshot(cfg, curr)
         print(f"No prior snapshot — baseline established for {len(curr)} user(s).")
@@ -446,7 +453,7 @@ def move_members(cfg: Config, client):
     mover_ids = {uid for uid, _p, _c in movers}
     subset = {uid: desired[uid] for uid in mover_ids if uid in desired}
     changes = diff(actual, subset)
-    plan = Plan(workflow="move", triggered_by="move:snapshot-diff", changes=changes)
+    plan = Plan(workflow="sync-moves", triggered_by="sync-moves:snapshot-diff", changes=changes)
     path = save_plan(cfg, plan)
 
     if changes:
@@ -554,8 +561,8 @@ def reassign(cfg: Config, client, *, file: Optional[str] = None):
         print(_render_change(c, label=c.subject, where=_where(org_index, c)))
     if not changes:
         print("  (no changes — everyone in the roster is already in their destination org)")
-    print(f"\nPlan saved: {path}")
-    print(f"Apply with:  python govern.py apply {path} --approved   # org adds/increases are gated")
+    _plan_footer(path, f"Apply with:  python govern.py apply {path} --approved   "
+                       "# org adds/increases are gated")
     return plan
 
 
@@ -656,8 +663,8 @@ def offboard(cfg: Config, client, *, user_id: Optional[str] = None,
                   f"{_where(org_index, c)}")
     if not changes:
         print("  (nothing to do — already offboarded)")
-    print(f"\nPlan saved: {path}")
-    print(f"Apply with:  python govern.py apply {path}   # all changes auto-apply")
+    _plan_footer(path, f"Apply with:  python govern.py apply {path}   "
+                       "# all changes auto-apply")
     return plan
 
 
@@ -748,8 +755,7 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
         for uid, ids in orphans.items():
             print(f"  - {email(uid)}: {ids}")
 
-    print(f"\nPlan saved: {path}")
-    print("Apply drift with:  python govern.py apply", path, "[--approved]")
+    _plan_footer(path, f"Apply drift with:  python govern.py apply {path} [--approved]")
     return plan
 
 

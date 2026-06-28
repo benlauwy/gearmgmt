@@ -207,8 +207,8 @@ def test_offboard_from_file_resolves_emails(cfg, tmp_path, capsys):
     assert "=== offboard (file:leavers.csv) ===" in out
 
 
-# --- move -------------------------------------------------------------------
-def test_move_detects_mover_and_rematerializes(cfg, capsys):
+# --- sync-moves -------------------------------------------------------------
+def test_sync_moves_detects_mover_and_rematerializes(cfg, capsys):
     write_policy(cfg, limits={"IDE Standard": 100, "CLI": 50},
                  roles={"IDE Standard": "role-ide", "CLI": "role-cli"})
     save_snapshot(cfg, {"u1": ["o1"]})           # baseline: u1 was in IDE Standard
@@ -217,10 +217,10 @@ def test_move_detects_mover_and_rematerializes(cfg, capsys):
         members=[member("u1", "mover@x.com", [ent_role("role-cli"), org_role("o2", "ro2")])],
         limits={"u1": {"local_agent": {"cycle_acu_limit": 100}}},
     )
-    plan = workflows.move_members(cfg, client)
+    plan = workflows.sync_moves(cfg, client)
     out = capsys.readouterr().out
 
-    assert "=== move (membership snapshot-diff) ===" in out
+    assert "=== sync-moves (membership snapshot-diff) ===" in out
     assert "mover@x.com" in out
     # Moved into CLI (limit 50) from a 100 cap -> decrease; role-cli already set.
     assert {c.kind for c in plan.changes} == {"limit_decrease"}

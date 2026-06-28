@@ -243,7 +243,7 @@ def read_utilizations(client, user_ids: list[str], *, time_after: int,
     return out
 
 
-# ---- membership snapshots (reactive move/offboard via snapshot-diff) ----
+# ---- membership snapshots (reactive sync-moves via snapshot-diff) ----
 def snapshot_path(cfg: Config) -> str:
     return os.path.join(cfg.path("state_dir"), "membership.json")
 

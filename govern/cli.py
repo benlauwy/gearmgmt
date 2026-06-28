@@ -43,7 +43,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="path to a CSV or .xlsx roster: an email column and an "
                          "optional group/org-name column (with a header row)")
 
-    add("move", "re-materialize members who changed orgs since last run")
+    add("sync-moves", "re-materialize members who changed orgs since last run "
+                      "(reactive: detects moves via snapshot-diff)")
 
     sp = add("reassign", "bulk-move members from a CSV/.xlsx roster to a new org "
                          "(add to destination + set its role/limit, remove from old org)")
@@ -120,8 +121,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     cmd = args.cmd
     if cmd == "onboard":
         workflows.onboard(cfg, client, file=getattr(args, "file", None))
-    elif cmd == "move":
-        workflows.move_members(cfg, client)
+    elif cmd == "sync-moves":
+        workflows.sync_moves(cfg, client)
     elif cmd == "reassign":
         workflows.reassign(cfg, client, file=getattr(args, "file", None))
     elif cmd == "offboard":
