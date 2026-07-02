@@ -71,6 +71,38 @@ def test_increase_applies_with_approval(cfg):
     assert os.path.exists(_archive_path(cfg, path))
 
 
+# --- org-role changes dispatch to set_org_role ------------------------------
+def test_org_role_change_applies_via_set_org_role(cfg):
+    # org-role drift is gated (role_change), so it needs --approved; applying it
+    # dispatches to set_org_role(org_id, user_id, role_id) and audits field=org_role.
+    plan = Plan(workflow="reconcile", changes=[
+        _change("u1", "role_change", field="org_role", before="ro1", after="ro2",
+                org_id="o1")])
+    path = save_plan(cfg, plan)
+    client = FakeClient()
+
+    apply_plan(cfg, client, plan, approved=True, plan_path=path)
+
+    assert client.calls == [("set_org_role", "o1", "u1", "ro2")]
+    assert plan.changes[0].status == "applied"
+    audit = read_audit(cfg)
+    assert len(audit) == 1 and audit[0]["field"] == "org_role"
+    assert os.path.exists(_archive_path(cfg, path))
+
+
+def test_org_role_change_held_without_approval(cfg):
+    plan = Plan(workflow="reconcile", changes=[
+        _change("u1", "role_change", field="org_role", before="ro1", after="ro2",
+                org_id="o1")])
+    path = save_plan(cfg, plan)
+    client = FakeClient()
+
+    apply_plan(cfg, client, plan, approved=False, plan_path=path)
+
+    assert client.calls == []
+    assert plan.changes[0].status == "pending"
+
+
 # --- atomicity per user -----------------------------------------------------
 def test_user_held_atomically_when_any_change_needs_approval(cfg):
     # u1 has one auto change AND one approval change: without --approved NEITHER

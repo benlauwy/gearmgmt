@@ -70,7 +70,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                   "usage-driven single-user upgrade")
     g.add_argument("--org", help="restrict to one org's members (by org name)")
     sp.add_argument("--limits-only", action="store_true", dest="limits_only",
-                    help="reconcile only ACU limits, leaving enterprise roles alone")
+                    help="reconcile only ACU limits, leaving enterprise and org roles alone")
     sp.set_defaults(func=_run_reconcile)
 
     sp = add("usage", "flag users near/at their cap (detection only)")

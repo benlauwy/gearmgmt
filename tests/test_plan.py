@@ -72,6 +72,62 @@ def test_diff_role_change_when_both_real():
     assert c.kind == "role_change" and c.before == "r1" and c.after == "r2"
 
 
+# --- diff: org-role dimension ({org_id: role_id}, one Change per org) --------
+def _desired_org(uid, *, org_role_by_oid, source="policy:IDE"):
+    return DesiredState(uid, None, None, source, org_role_by_oid=dict(org_role_by_oid))
+
+
+def test_diff_org_role_change_is_gated_and_org_stamped():
+    actual = {"u1": ActualState("u1", org_roles={"o1": {"role_id": "ro1"}})}
+    desired = {"u1": _desired_org("u1", org_role_by_oid={"o1": "ro2"})}
+    (c,) = diff(actual, desired)
+    assert c.field == "org_role" and c.kind == "role_change"
+    assert c.before == "ro1" and c.after == "ro2"
+    assert c.org_id == "o1"          # targets the specific membership
+    assert c.needs_approval is True  # gated, like an enterprise role_change
+
+
+def test_diff_org_role_no_change_when_matching():
+    actual = {"u1": ActualState("u1", org_roles={"o1": {"role_id": "ro1"}})}
+    desired = {"u1": _desired_org("u1", org_role_by_oid={"o1": "ro1"})}
+    assert diff(actual, desired) == []
+
+
+def test_diff_org_role_grant_when_absent_in_that_org():
+    # No org role recorded for the governed org -> a (still gated) grant.
+    actual = {"u1": ActualState("u1", org_roles={})}
+    desired = {"u1": _desired_org("u1", org_role_by_oid={"o1": "ro2"})}
+    (c,) = diff(actual, desired)
+    assert c.kind == "role_grant" and c.before is None and c.after == "ro2"
+
+
+def test_diff_org_role_empty_map_is_no_op():
+    actual = {"u1": ActualState("u1", org_roles={"o1": {"role_id": "ro1"}})}
+    desired = {"u1": _desired_org("u1", org_role_by_oid={})}
+    assert diff(actual, desired) == []
+
+
+def test_diff_admin_org_role_across_multiple_orgs():
+    # An admin's org role governed on several orgs -> one Change per DRIFTING org.
+    actual = {"u1": ActualState("u1", org_roles={
+        "o1": {"role_id": "ro1"}, "o2": {"role_id": "admin-org"}})}
+    desired = {"u1": _desired_org("u1", source="admin",
+                                  org_role_by_oid={"o1": "admin-org", "o2": "admin-org"})}
+    changes = diff(actual, desired)
+    assert [(c.field, c.org_id, c.after) for c in changes] == \
+        [("org_role", "o1", "admin-org")]  # o2 already matches
+
+
+def test_diff_enterprise_and_org_role_are_independent_changes():
+    # Both role dimensions drift -> two Changes, distinguished by field + org_id.
+    actual = {"u1": ActualState("u1", enterprise_role={"role_id": "e1"},
+                                org_roles={"o1": {"role_id": "ro1"}})}
+    desired = {"u1": DesiredState("u1", None, "e2", "policy:IDE", check_role=True,
+                                  org_role_by_oid={"o1": "ro2"})}
+    fields = {(c.field, c.org_id) for c in diff(actual, desired)}
+    assert fields == {("enterprise_role", None), ("org_role", "o1")}
+
+
 def test_diff_missing_actual_user_classifies_limit_as_decrease():
     # Characterization of a subtle rule: a user absent from `actual` reads back
     # limit=None, and since None ranks as *unlimited* (highest), setting any

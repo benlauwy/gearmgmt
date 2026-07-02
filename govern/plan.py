@@ -29,7 +29,7 @@ AUTO_APPLY = {"limit_decrease", "role_revoke", "role_downgrade", "org_remove"}
 class Change:
     user_id: str
     kind: str                 # one of NEEDS_APPROVAL | AUTO_APPLY
-    field: str                # "limit" | "enterprise_role" | "org_membership"
+    field: str                # "limit" | "enterprise_role" | "org_role" | "org_membership"
     before: Any
     after: Any
     reason: str
@@ -96,14 +96,26 @@ def limit_kind(current, target) -> str:
     return "limit_increase" if tgt > cur else "limit_decrease"
 
 
+def _role_kind(current, target) -> str:
+    """Classify a role change (enterprise or org): grant (none->real), revoke
+    (real->none), or change (real->real). role_change is conservatively gated
+    (we don't rank roles); grant is gated, revoke auto-applies."""
+    if target is None:
+        return "role_revoke"
+    if current is None:
+        return "role_grant"
+    return "role_change"
+
+
 def diff(actual: dict, desired: dict[str, object]) -> list[Change]:
     """Compute the change set between actual and desired per-user state.
 
     Set-to-desired, never increment. Only the dimensions each DesiredState marks
-    with check_limit / check_role are compared. Changes are classified so the
-    approval gate can split increases/grants (NEEDS_APPROVAL) from
-    revokes/downgrades (AUTO_APPLY). ``actual`` maps user_id -> ActualState; a
-    user absent from it reads back as no limit / no role.
+    are compared: check_limit / check_role, plus one org-role check per entry in
+    org_role_by_oid. Changes are classified so the approval gate can split
+    increases/grants (NEEDS_APPROVAL) from revokes/downgrades (AUTO_APPLY).
+    ``actual`` maps user_id -> ActualState; a user absent from it reads back as no
+    limit / no role.
     """
     changes: list[Change] = []
     for user_id, d in desired.items():
@@ -116,12 +128,15 @@ def diff(actual: dict, desired: dict[str, object]) -> list[Change]:
         if getattr(d, "check_role", False):
             cur = ((a.enterprise_role if a else None) or {}).get("role_id")
             if cur != d.enterprise_role:
-                if d.enterprise_role is None:
-                    kind = "role_revoke"
-                elif cur is None:
-                    kind = "role_grant"
-                else:
-                    kind = "role_change"
-                changes.append(Change(user_id, kind, "enterprise_role",
-                                      cur, d.enterprise_role, d.source))
+                changes.append(Change(user_id, _role_kind(cur, d.enterprise_role),
+                                      "enterprise_role", cur, d.enterprise_role,
+                                      d.source))
+        # An org role is scoped to a single org, so compare each governed
+        # membership independently and stamp the Change with its org_id (so
+        # plan/apply target it and the console shows which org it belongs to).
+        for oid, want in (getattr(d, "org_role_by_oid", None) or {}).items():
+            cur = ((a.org_roles.get(oid) if a else None) or {}).get("role_id")
+            if cur != want:
+                changes.append(Change(user_id, _role_kind(cur, want), "org_role",
+                                      cur, want, d.source, org_id=oid))
     return changes

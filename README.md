@@ -124,6 +124,13 @@ python govern.py reconcile                                         # report drif
 python govern.py apply state/plans/reconcile-<ts>.json             # decreases/revokes now
 python govern.py apply state/plans/reconcile-<ts>.json --approved  # ...increases/grants too
 ```
+It checks three dimensions: each member's **ACU limit**, **enterprise role**, and
+**per-org member role**. Non-admins are reconciled to `[invite].org_role_id` (the
+role `onboard` grants) in their org; admins are reconciled to
+`[governance].admin_org_role_id` on every org they're in. `overrides.toml` users
+are exempt, and each org-role check is skipped when its setting is unconfigured.
+Org-role drift is gated like an enterprise-role change. `--limits-only` reconciles
+just the ACU limit, leaving both roles alone.
 
 ### Someone's hitting their cap → `usage`
 `usage` flags anyone near/at their limit (detection only — it writes no plan). To
@@ -178,11 +185,15 @@ python govern.py apply state/plans/offboard-<ts>.json
 
 ## 3. How it works
 
-The engine governs two per-user dimensions:
+The engine governs three per-user dimensions:
 
 - **Limit** — the per-user Local Agent ACU cycle limit.
 - **Enterprise role** — the single, global product-access role (e.g. *IDE only*,
   *CLI and IDE*).
+- **Org role** — the member's role *inside* their org(s). Non-admins are
+  reconciled to `[invite].org_role_id` (the role `onboard` grants) in their single
+  org; admins are reconciled to `[governance].admin_org_role_id` on **every** org
+  they belong to. Leave the respective setting unset to skip that class.
 
 **Desired state** for each user is resolved with this precedence:
 
@@ -190,12 +201,15 @@ The engine governs two per-user dimensions:
    are excluded from correction.
 2. **Admin** — if the user's *actual* enterprise role name contains an admin
    keyword (`config.toml [governance].admin_role_name_contains`), they keep their
-   role and may belong to many orgs (no role/single-org correction), but their
-   **limit is still governed** — sourced from the **Admin Org**
-   (`[governance].admin_org_name`, default `"Admin Org"`). An admin who is *not*
-   a member of the Admin Org still gets that limit, but `reconcile` flags them
-   with a warning.
-3. **Policy** — otherwise the user's single governed org determines limit + role.
+   **enterprise** role and may belong to many orgs (no enterprise-role/single-org
+   correction), but their **limit is still governed** — sourced from the **Admin
+   Org** (`[governance].admin_org_name`, default `"Admin Org"`) — and their **org
+   role** is governed on **every** org they belong to, from
+   `[governance].admin_org_role_id` (unset ⇒ left alone). An admin who is *not* a
+   member of the Admin Org still gets that limit, but `reconcile` flags them with
+   a warning.
+3. **Policy** — otherwise the user's single governed org determines limit +
+   enterprise role, and their org role is reconciled to `[invite].org_role_id`.
 4. **Flags** — a non-admin in **0** governed orgs → `no-governed-org`; in **>1** →
    `violation` (the single-org rule).
 
@@ -239,7 +253,7 @@ Add `--dry-run` to any command to simulate without writing anything.
 
 | Command | What it does |
 |---|---|
-| `reconcile [--user USER \| --org NAME] [--limits-only]` | Report drift (actual vs desired) and save a plan. Covers **everyone** and both dimensions (limits + roles) by default; scope it to one `--user`/`--org`, and/or pass `--limits-only` to reconcile just ACU limits. `reconcile --user USER --limits-only` is the usage-driven single-user upgrade |
+| `reconcile [--user USER \| --org NAME] [--limits-only]` | Report drift (actual vs desired) and save a plan. Covers **everyone** and every dimension (limit + enterprise role + per-org member role) by default; scope it to one `--user`/`--org`, and/or pass `--limits-only` to reconcile just ACU limits (leaving both roles alone). `reconcile --user USER --limits-only` is the usage-driven single-user upgrade |
 | `coverage` | Per-org intended-vs-actual limit & role coverage. Admins are role-exempt (kept out of every org's role coverage), but their limit is folded into the **Admin Org's** limit coverage |
 | `capacity` | Sum every member's per-user monthly ACU limit into one enterprise-wide total (read-only). A limit pinned in `overrides.toml` wins over the live value — finite overrides are folded into the total (even over an unset/unlimited live value), unlimited ones count as unlimited; unlimited & unset members are counted separately, not folded into the total |
 | `usage` | Flag users near/at their cap; emit upgrade candidates. Rows print highest-usage first; `--reverse` flips to lowest-usage first. `--user EMAIL_OR_USER_ID` restricts the report to a single member (a spot-check) — it prints just that row and does **not** overwrite the shared `state/usage-candidates.json` worklist. `--export PATH` also writes the full table (all rows, not just candidates) as CSV or Excel, chosen by the extension (`.csv`/`.tsv` or `.xlsx`; Excel needs openpyxl) |
@@ -264,8 +278,9 @@ the command): `--dry-run`, `--config PATH`.
 - `roles.toml` — per-org desired enterprise `role_id`. *(git-ignored — copy from `roles.toml.example`)*
 - `overrides.toml` — per-user exceptions, keyed by `user_id` (honored, excluded
   from correction; this is where admins are pinned). *(git-ignored — copy from `overrides.toml.example`)*
-- `config.toml` — admin detection + Admin Org name, leaver role/limit, near-cap
-  thresholds, retry, invite org-role (`[invite]`). *(git-ignored — copy from `config.toml.example`)*
+- `config.toml` — admin detection + Admin Org name + admin org-role, leaver
+  role/limit, near-cap thresholds, retry, invite/member org-role (`[invite]`).
+  *(git-ignored — copy from `config.toml.example`)*
 
 > `config.toml`, `roles.toml`, and `overrides.toml` hold tenant-specific IDs / PII,
 > so they are git-ignored and committed only as `*.example` templates. Keep your
@@ -281,10 +296,10 @@ the command): `--dry-run`, `--config PATH`.
 
 ## 6. Notes & caveats
 
-- **Role changes are conservatively gated.** A real→real enterprise-role change is
-  treated as needing approval (we don't yet rank roles, so we can't prove it's a
-  downgrade). Offboarding is exempt (always auto). To let genuine downgrades
-  auto-apply, add a role rank.
+- **Role changes are conservatively gated.** A real→real role change — enterprise
+  *or* org role — is treated as needing approval (we don't yet rank roles, so we
+  can't prove it's a downgrade). Offboarding is exempt (always auto). To let
+  genuine downgrades auto-apply, add a role rank.
 - **Enterprise roles can't be cleared to "none"** via the API — they can only be
   *set* to another role. The normal workflows never try to clear one.
 - **IDP-group-derived memberships** can't be removed by `offboard`/`apply`

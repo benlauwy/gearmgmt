@@ -46,6 +46,8 @@ def _apply_change(client, c: Change) -> str:
         if c.after is None:
             raise RuntimeError("enterprise-role revoke is unsupported (no API to clear an enterprise role)")
         client.set_enterprise_role(c.user_id, c.after)
+    elif c.field == "org_role":
+        client.set_org_role(c.org_id, c.user_id, c.after)
     elif c.field == "org_membership":
         if c.kind == "org_add":
             client.add_user_to_org(c.org_id, c.user_id, c.after)

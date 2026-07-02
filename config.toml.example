@@ -23,6 +23,13 @@ admin_role_name_contains = ["Admin"]
 # The org whose limits.toml entry provides every admin's ACU limit. An admin who
 # is not a member of this org still gets its limit, but reconcile flags them.
 admin_org_name = "Admin Org"
+# The per-org member role every admin should hold. Unlike non-admins (governed by
+# [invite].org_role_* in their single org), an admin's role is reconciled on EVERY
+# org they belong to. Provide EITHER admin_org_role_id (exact, preferred) OR
+# admin_org_role_name (resolved against GET /v3/enterprise/roles). Leave BOTH
+# unset to leave admins' org roles alone (overrides.toml users are always exempt).
+# admin_org_role_name = "Organization Admin"
+# admin_org_role_id = "role-REPLACE_WITH_ADMIN_ORG_ROLE_ID"
 
 [leaver]
 # On offboard, zero the limit, remove the user from ALL orgs, then set this
@@ -49,6 +56,13 @@ products          = []
 # Provide EITHER org_role_id (exact, preferred) OR org_role_name (resolved
 # against GET /v3/enterprise/roles at runtime). If neither resolves, `onboard`
 # prints the available org roles so you can fill one in.
+#
+# `reconcile` ALSO uses this value: it is the expected per-org member role for
+# every GOVERNED non-admin, so drift from it (a member on the wrong org role) is
+# flagged and gated like an enterprise-role change. Admins (who may hold an
+# elevated org role) and overrides.toml users are exempt. Leave this unset to
+# leave org roles ungoverned (reconcile then only checks limits + enterprise
+# roles, as before).
 org_role_name = "Organization User"
 # org_role_id = "role-REPLACE_WITH_ORG_MEMBER_ROLE_ID"
 

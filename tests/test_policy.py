@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from govern.policy import Policy, coerce_limit, resolve_desired
+from govern.policy import Policy, coerce_limit, match_org_role_ids, resolve_desired
 
 
 # --- coerce_limit -----------------------------------------------------------
@@ -163,3 +163,97 @@ def test_one_governed_plus_one_ungoverned_is_single(cfg):
     d = resolve_desired("u1", ["IDE", "Ungoverned"], is_admin=False, policy=pol, cfg=cfg)
     assert d.source == "policy:IDE"
     assert d.limit == 100
+
+
+# --- match_org_role_ids -----------------------------------------------------
+def test_match_org_role_ids_prefers_id_over_name():
+    # An explicit id wins and needs no roles list to resolve.
+    assert match_org_role_ids("role-x", "Ignored", []) == ["role-x"]
+
+
+def test_match_org_role_ids_resolves_name_case_insensitive():
+    roles = [{"role_id": "r1", "role_name": "Organization User"},
+             {"role_id": "r2", "role_name": "Org Admin"}]
+    assert match_org_role_ids(None, "organization user", roles) == ["r1"]
+
+
+def test_match_org_role_ids_none_configured_is_empty():
+    assert match_org_role_ids(None, None, [{"role_id": "r1", "role_name": "X"}]) == []
+
+
+def test_match_org_role_ids_reports_no_or_ambiguous_match():
+    roles = [{"role_id": "r1", "role_name": "Dup"}, {"role_id": "r2", "role_name": "Dup"}]
+    assert match_org_role_ids(None, "Dup", roles) == ["r1", "r2"]  # ambiguous
+    assert match_org_role_ids(None, "Nope", roles) == []           # no match
+
+
+# --- resolve_desired: org-role dimension (as {org_id: role_id}) -------------
+def test_org_role_governed_for_single_org_non_admin(cfg):
+    # A governed non-admin's role in their single org -> the member org_role_id,
+    # keyed by that org's id.
+    pol = _policy(limits={"IDE": 100}, roles={"IDE": "role-ide"})
+    d = resolve_desired("u1", ["IDE"], is_admin=False, policy=pol, cfg=cfg,
+                        org_role_id="role-org", name_to_org_id={"IDE": "o1"})
+    assert d.org_role_by_oid == {"o1": "role-org"}
+
+
+def test_org_role_ungoverned_when_no_member_org_role(cfg):
+    # No member org role -> org roles left ungoverned (backward compatible).
+    pol = _policy(limits={"IDE": 100}, roles={"IDE": "role-ide"})
+    d = resolve_desired("u1", ["IDE"], is_admin=False, policy=pol, cfg=cfg,
+                        org_role_id=None, name_to_org_id={"IDE": "o1"})
+    assert d.org_role_by_oid == {}
+
+
+def test_org_role_exempt_for_override_users(cfg):
+    # overrides.toml users are full exceptions -> org role not reconciled (even
+    # with both the member and admin org roles configured).
+    pol = _policy(overrides={"u1": {"limit": 50}})
+    d = resolve_desired("u1", ["IDE"], is_admin=False, policy=pol, cfg=cfg,
+                        org_role_id="role-org", admin_org_role_id="role-admin-org",
+                        name_to_org_id={"IDE": "o1"})
+    assert d.source == "override"
+    assert d.org_role_by_oid == {}
+
+
+def test_org_role_exempt_for_violation_and_no_org(cfg):
+    # A non-admin in >1 governed org (violation) or 0 (no-governed-org) has no
+    # single org to govern the role in.
+    pol = _policy(limits={"IDE": 100, "CLI": 50}, roles={"IDE": "r1", "CLI": "r2"})
+    viol = resolve_desired("u1", ["IDE", "CLI"], is_admin=False, policy=pol, cfg=cfg,
+                           org_role_id="role-org", name_to_org_id={"IDE": "o1", "CLI": "o2"})
+    assert viol.source == "violation" and viol.org_role_by_oid == {}
+    none = resolve_desired("u2", [], is_admin=False, policy=pol, cfg=cfg,
+                           org_role_id="role-org", name_to_org_id={})
+    assert none.source == "no-governed-org" and none.org_role_by_oid == {}
+
+
+# --- admin org-role governance (every org the admin belongs to) -------------
+def test_admin_org_role_governed_on_every_org(cfg):
+    # governance.admin_org_role_id governs an admin's role on ALL their orgs; the
+    # member [invite] role is NOT applied to admins.
+    pol = _policy(limits={"Admin Org": 1000}, roles={"Admin Org": "role-admin"})
+    d = resolve_desired("u1", ["Admin Org", "IDE"], is_admin=True, policy=pol, cfg=cfg,
+                        org_role_id="role-member", admin_org_role_id="role-admin-org",
+                        name_to_org_id={"Admin Org": "oa", "IDE": "o1"})
+    assert d.source == "admin"
+    assert d.org_role_by_oid == {"oa": "role-admin-org", "o1": "role-admin-org"}
+
+
+def test_admin_org_role_ungoverned_when_unset(cfg):
+    # No admin_org_role_id -> admins keep their org roles (exempt, as before).
+    pol = _policy(limits={"Admin Org": 1000}, roles={"Admin Org": "role-admin"})
+    d = resolve_desired("u1", ["Admin Org", "IDE"], is_admin=True, policy=pol, cfg=cfg,
+                        org_role_id="role-member", admin_org_role_id=None,
+                        name_to_org_id={"Admin Org": "oa", "IDE": "o1"})
+    assert d.org_role_by_oid == {}
+
+
+def test_admin_org_role_governed_even_outside_admin_org(cfg):
+    # An admin who is not in the Admin Org is still flagged, but its org role is
+    # governed on the orgs it IS in.
+    pol = _policy(limits={"Admin Org": 1000}, roles={"Admin Org": "role-admin"})
+    d = resolve_desired("u1", ["IDE"], is_admin=True, policy=pol, cfg=cfg,
+                        admin_org_role_id="role-admin-org", name_to_org_id={"IDE": "o1"})
+    assert d.source == "admin-no-admin-org"
+    assert d.org_role_by_oid == {"o1": "role-admin-org"}

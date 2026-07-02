@@ -24,7 +24,7 @@ from .intake import (
     validate_roster_emails,
 )
 from .plan import Change, Plan, diff, save_plan
-from .policy import coerce_limit
+from .policy import coerce_limit, match_org_role_ids
 from .population import org_id_by_name, resolve_population
 from .render import change_counts, emailer, plan_footer, render_change, where
 from .state import read_actual, read_org_index, resolve_one
@@ -36,23 +36,23 @@ def _resolve_org_role_id(cfg: Config, client) -> str:
     Prefers ``[invite].org_role_id``; else resolves ``[invite].org_role_name``
     against the live org-type roles. Exits with the available org roles listed if
     neither is configured (or the name doesn't match) so the operator can fix it
-    BEFORE anything is mutated."""
+    BEFORE anything is mutated. (reconcile uses the tolerant
+    population.configured_org_role_ids for the same config — it never raises.)"""
     inv = cfg.invite or {}
     rid = inv.get("org_role_id")
     if rid:
         return rid
     org_roles = [r for r in client.list_roles() if r.get("role_type") == "org"]
+    ids = match_org_role_ids(inv.get("org_role_id"), inv.get("org_role_name"), org_roles)
+    if len(ids) == 1:
+        return ids[0]
     available = "; ".join(f"{r.get('role_name')} = {r.get('role_id')}"
                           for r in org_roles) or "(none found)"
     name = inv.get("org_role_name")
+    if name and not ids:
+        raise GovernError(f"no org role named {name!r}. "
+                          f"Available org roles: {available}")
     if name:
-        match = [r for r in org_roles
-                 if (r.get("role_name") or "").lower() == name.lower()]
-        if len(match) == 1:
-            return match[0]["role_id"]
-        if not match:
-            raise GovernError(f"no org role named {name!r}. "
-                              f"Available org roles: {available}")
         raise GovernError(f"multiple org roles named {name!r}")
     raise GovernError(
         "onboarding needs an org-level role for new members. Set "
@@ -349,17 +349,20 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
     """Report drift of actual vs desired (limits + roles) and save a plan.
 
     Read-only — it computes and saves a plan but does not apply it. By default it
-    covers EVERYONE and both dimensions (limits + enterprise roles); narrow it
-    with:
+    covers EVERYONE and every dimension: ACU limit, enterprise role, and — for
+    governed non-admins — the per-org member role (reconciled to the single global
+    ``[invite]`` org role; ungoverned if that isn't configured). Narrow it with:
 
       - ``user_id`` (--user, an email or user_id) — just that one member;
       - ``org`` (--org NAME) — just that org's members;
-      - ``limits_only`` (--limits-only) — only ACU-limit drift, leaving roles
-        alone (the single-user form is the usage-driven upgrade).
+      - ``limits_only`` (--limits-only) — only ACU-limit drift, leaving both the
+        enterprise and org roles alone (the single-user form is the usage-driven
+        upgrade).
 
-    Honors overrides, admin limit-governance (via the Admin Org, with roles and
-    the single-org rule left exempt), and the single-governed-org rule, and flags
-    non-admins in >1 org. ``--user`` and ``--org`` are mutually exclusive."""
+    Honors overrides, admin governance (limit via the Admin Org, with enterprise
+    AND org roles plus the single-org rule left exempt), and the single-governed-
+    org rule, and flags non-admins in >1 org. ``--user`` and ``--org`` are
+    mutually exclusive."""
     if user_id and org:
         raise GovernError("reconcile takes at most one of --user / --org")
 
@@ -400,8 +403,10 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
     if changes:
         print("Drift detail:")
         for c in changes:
+            # `where` stamps the org on org-role lines so an org-role change
+            # (field=org_role) is distinguishable from an enterprise-role one.
             print(render_change(c, label=email(c.user_id), show_field=False,
-                                 suffix=f"  ({c.reason})"))
+                                 where=where(org_index, c), suffix=f"  ({c.reason})"))
         print()
 
     admins = [uid for uid, d in desired.items()
@@ -418,7 +423,8 @@ def reconcile(cfg: Config, client, *, user_id: Optional[str] = None,
         if unknown:
             orphans[uid] = unknown
 
-    print(f"Admins (limit-governed via Admin Org; role & single-org exempt): {len(admins)}")
+    print(f"Admins (limit via Admin Org, org role when configured; "
+          f"enterprise-role & single-org exempt): {len(admins)}")
     for uid in admins:
         rn = (actual[uid].enterprise_role or {}).get("role_name")
         print(f"  - {email(uid)} ({rn})")

@@ -81,8 +81,122 @@ def test_reconcile_governs_admin_limits_via_admin_org(cfg, capsys):
     assert "a3" not in by_user                       # already compliant
     assert all(c.field == "limit" for c in plan.changes)  # roles never touched
 
-    assert "Admins (limit-governed via Admin Org" in out
+    assert "Admins (limit via Admin Org" in out
     assert "WARNING:" in out and "admin2@x.com" in out
+
+
+def test_reconcile_checks_org_roles_via_invite_role(cfg, capsys):
+    # With [invite].org_role_id set, reconcile reconciles each governed non-admin's
+    # role INSIDE their org to that global value (gated, like enterprise roles).
+    write_policy(cfg, limits={"IDE Standard": 100}, roles={"IDE Standard": "role-ide"})
+    cfg.invite["org_role_id"] = "role-org"
+    client = FakeClient(
+        orgs={"o1": "IDE Standard"},
+        members=[
+            member("u1", "match@x.com", [ent_role("role-ide"), org_role("o1", "role-org")]),
+            member("u2", "orgdrift@x.com", [ent_role("role-ide"), org_role("o1", "role-old")]),
+        ],
+        limits={"u1": {"local_agent": {"cycle_acu_limit": 100}},
+                "u2": {"local_agent": {"cycle_acu_limit": 100}}},
+    )
+    plan = workflows.reconcile(cfg, client)
+    out = capsys.readouterr().out
+
+    org_changes = [c for c in plan.changes if c.field == "org_role"]
+    assert len(org_changes) == 1
+    c = org_changes[0]
+    assert c.user_id == "u2" and c.before == "role-old" and c.after == "role-org"
+    assert c.kind == "role_change" and c.org_id == "o1" and c.needs_approval
+    assert not any(c.user_id == "u1" for c in plan.changes)  # matches on every dim
+    assert "[IDE Standard]" in out                            # org tag on the drift line
+
+
+def test_reconcile_resolves_org_role_by_name(cfg, capsys):
+    # org_role_name is resolved against the live org-type roles (like onboard).
+    write_policy(cfg, limits={"IDE Standard": 100}, roles={"IDE Standard": "role-ide"})
+    cfg.invite["org_role_name"] = "Organization User"
+    client = FakeClient(
+        orgs={"o1": "IDE Standard"},
+        roles=[{"role_id": "role-org", "role_name": "Organization User", "role_type": "org"}],
+        members=[member("u2", "orgdrift@x.com",
+                        [ent_role("role-ide"), org_role("o1", "role-old")])],
+        limits={"u2": {"local_agent": {"cycle_acu_limit": 100}}},
+    )
+    plan = workflows.reconcile(cfg, client)
+    capsys.readouterr()
+
+    org_changes = [c for c in plan.changes if c.field == "org_role"]
+    assert len(org_changes) == 1 and org_changes[0].after == "role-org"
+
+
+def test_reconcile_limits_only_excludes_org_roles(cfg, capsys):
+    write_policy(cfg, limits={"IDE Standard": 100}, roles={"IDE Standard": "role-ide"})
+    cfg.invite["org_role_id"] = "role-org"
+    client = FakeClient(
+        orgs={"o1": "IDE Standard"},
+        members=[member("u2", "orgdrift@x.com",
+                        [ent_role("role-ide"), org_role("o1", "role-old")])],
+        limits={"u2": {"local_agent": {"cycle_acu_limit": 50}}},   # limit also drifts
+    )
+    plan = workflows.reconcile(cfg, client, limits_only=True)
+    capsys.readouterr()
+    assert [c.field for c in plan.changes] == ["limit"]  # org-role drift excluded
+
+
+def test_reconcile_org_roles_ungoverned_when_invite_unset(cfg, capsys):
+    # No [invite] org role configured -> org roles are left alone (safe default).
+    write_policy(cfg, limits={"IDE Standard": 100}, roles={"IDE Standard": "role-ide"})
+    client = FakeClient(
+        orgs={"o1": "IDE Standard"},
+        members=[member("u2", "orgdrift@x.com",
+                        [ent_role("role-ide"), org_role("o1", "role-old")])],
+        limits={"u2": {"local_agent": {"cycle_acu_limit": 100}}},
+    )
+    plan = workflows.reconcile(cfg, client)
+    capsys.readouterr()
+    assert not any(c.field == "org_role" for c in plan.changes)
+
+
+def test_reconcile_admin_org_role_untouched_when_admin_role_unset(cfg, capsys):
+    # The member [invite] role must NOT be applied to admins; with no admin org
+    # role configured, an admin's elevated org role is left alone.
+    write_policy(cfg, limits={"Admin Org": 1000}, roles={"Admin Org": "role-admin"})
+    cfg.invite["org_role_id"] = "role-org"
+    client = FakeClient(
+        orgs={"oa": "Admin Org"},
+        members=[member("a1", "admin@x.com",
+                        [ent_role("role-adm", "Admin"), org_role("oa", "role-org-admin")])],
+        limits={"a1": {"local_agent": {"cycle_acu_limit": 1000}}},
+    )
+    plan = workflows.reconcile(cfg, client)
+    capsys.readouterr()
+    assert not any(c.field == "org_role" for c in plan.changes)
+
+
+def test_reconcile_governs_admin_org_role_on_every_org(cfg, capsys):
+    # [governance].admin_org_role_id governs an admin's role on EVERY org they're
+    # in (gated), independent of the member [invite] role.
+    write_policy(cfg, limits={"Admin Org": 1000}, roles={"Admin Org": "role-admin"})
+    cfg.governance["admin_org_role_id"] = "role-admin-org"
+    cfg.invite["org_role_id"] = "role-member"   # must NOT be applied to admins
+    client = FakeClient(
+        orgs={"oa": "Admin Org", "o1": "IDE Standard"},
+        members=[member("a1", "admin@x.com",
+                        [ent_role("role-adm", "Admin"),
+                         org_role("oa", "role-admin-org"),   # already correct
+                         org_role("o1", "role-old")])],       # drifts
+        limits={"a1": {"local_agent": {"cycle_acu_limit": 1000}}},
+    )
+    plan = workflows.reconcile(cfg, client)
+    out = capsys.readouterr().out
+
+    org_changes = [c for c in plan.changes if c.field == "org_role"]
+    assert len(org_changes) == 1                      # only the drifting org (o1)
+    c = org_changes[0]
+    assert c.user_id == "a1" and c.org_id == "o1"
+    assert c.before == "role-old" and c.after == "role-admin-org"
+    assert c.kind == "role_change" and c.needs_approval
+    assert "[IDE Standard]" in out
 
 
 # --- onboard ----------------------------------------------------------------

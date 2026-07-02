@@ -101,6 +101,12 @@ class FakeClient:
         self._maybe_fail("set_enterprise_role")
         self.calls.append(("set_enterprise_role", user_id, role_id))
 
+    def set_org_role(self, org_id, user_id, role_id):
+        if self.dry_run:
+            return self._sentinel("PATCH")
+        self._maybe_fail("set_org_role")
+        self.calls.append(("set_org_role", org_id, user_id, role_id))
+
     def add_user_to_org(self, org_id, user_id, role_id):
         if self.dry_run:
             return self._sentinel("POST")
